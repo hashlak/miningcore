@@ -1103,6 +1103,17 @@ public class ClusterBanningConfig
     /// Ban clients sending invalid logins
     /// </summary>
     public bool? BanOnLoginFailure { get; set; }
+
+    /// <summary>
+    /// Seconds an IP stays banned after a failed login (null = 10). The ban is re-armed on every retry,
+    /// so keep it short where many rigs share one NAT address.
+    /// </summary>
+    public int? LoginFailureBanTime { get; set; }
+
+    /// <summary>
+    /// Seconds an IP stays banned after sending non-JSON input or failing the TLS handshake (null = 180)
+    /// </summary>
+    public int? JunkReceiveBanTime { get; set; }
 }
 
 public partial class PoolShareBasedBanningConfig

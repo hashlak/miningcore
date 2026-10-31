@@ -139,6 +139,47 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
         }
     }
 
+    /// <summary>
+    /// Zephyr: amount of the miner's own coinbase output (miner_tx.vout[0]) in atomic units, read via get_block.
+    /// Returns null when the daemon or the block JSON cannot be read - callers must leave the block pending, never estimate.
+    /// </summary>
+    private async Task<decimal?> GetZephyrMinerRewardAsync(ulong height, CancellationToken ct)
+    {
+        var response = await rpcClient.ExecuteAsync<GetBlockResponse>(logger, CNC.GetBlock, ct, new GetBlockRequest { Height = height });
+
+        if(response.Error != null)
+        {
+            logger.Warn(() => $"[{LogCategory}] Daemon command '{CNC.GetBlock}' returned error: {response.Error.Message} code {response.Error.Code} for block {height}");
+            return null;
+        }
+
+        if(string.IsNullOrEmpty(response.Response?.Json))
+        {
+            logger.Warn(() => $"[{LogCategory}] Daemon command '{CNC.GetBlock}' returned no block json for block {height}");
+            return null;
+        }
+
+        try
+        {
+            var vout = JObject.Parse(response.Response.Json)["miner_tx"]?["vout"] as JArray;
+            var amount = vout?.FirstOrDefault()?["amount"]?.Value<ulong>();
+
+            if(amount is null or 0)
+            {
+                logger.Warn(() => $"[{LogCategory}] Block {height}: miner_tx.vout[0].amount is missing or zero");
+                return null;
+            }
+
+            return amount.Value;
+        }
+
+        catch(Exception ex)
+        {
+            logger.Warn(() => $"[{LogCategory}] Block {height}: cannot parse block json: {ex.Message}");
+            return null;
+        }
+    }
+
     private async Task<bool> EnsureBalance(decimal requiredAmount, CryptonoteCoinTemplate coin, CancellationToken ct)
     {
         decimal unlockedBalance = 0.0m;
@@ -149,23 +190,32 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
         {
             case "SAL":
             case "ZEPH":
-                var responseBalances = await rpcClientWallet.ExecuteAsync<GetBalancesResponse>(logger, CryptonoteWalletCommands.GetBalance, ct);
+                // Zephyr: hard fork v11 (mainnet 536000) renamed the base asset ZEPH -> ZPH and wallet-rpc v2.3.0 defaults every
+                // asset parameter to ZPH; chains that never reached v11 (testnet/stagenet stop at HF 3) still report ZEPH.
+                // Ask for all assets and take the FIRST matching name - never sum two names for the same coins.
+                var isZephyr = coin.Symbol == "ZEPH";
+                var walletAssetNames = isZephyr ? ZephyrConstants.WalletAssetNames : new[] { coin.Symbol };
+                var balanceRequest = isZephyr ? new GetBalanceRequest { AllAssets = true } : null;
+
+                var responseBalances = await rpcClientWallet.ExecuteAsync<GetBalancesResponse>(logger, CryptonoteWalletCommands.GetBalance, ct, balanceRequest);
 
                 if(responseBalances.Error != null)
                 {
                     logger.Error(() => $"[{LogCategory}] Daemon command '{CryptonoteWalletCommands.GetBalance}' returned error: {responseBalances.Error.Message} code {responseBalances.Error.Code}");
                     return false;
                 }
-                
-                var balances = responseBalances.Response.Balances
-                    .Where(x => x.Asset == coin.Symbol)
-                    .ToArray();
-                
-                if(balances.Length > 0)
+
+                var assetBalance = walletAssetNames
+                    .Select(name => responseBalances.Response?.Balances?.FirstOrDefault(x => x.Asset == name))
+                    .FirstOrDefault(x => x != null);
+
+                if(assetBalance != null)
                 {
-                    unlockedBalance = balances.Sum(x => (x.UnlockedBalance / coin.SmallestUnit));
-                    balance = balances.Sum(x => (x.Balance / coin.SmallestUnit));
+                    unlockedBalance = assetBalance.UnlockedBalance / coin.SmallestUnit;
+                    balance = assetBalance.Balance / coin.SmallestUnit;
                 }
+                else
+                    logger.Warn(() => $"[{LogCategory}] Wallet returned no balance entry for {string.Join("/", walletAssetNames)} (assets seen: {string.Join(",", responseBalances.Response?.Balances?.Select(x => x.Asset) ?? Array.Empty<string>())})");
                 break;
             default:
                 var responseBalance = await rpcClientWallet.ExecuteAsync<GetBalanceResponse>(logger, CryptonoteWalletCommands.GetBalance, ct);
@@ -492,37 +542,34 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                 // matured and spendable?
                 if(blockHeader.Depth >= CryptonoteConstants.PayoutMinBlockConfirmations)
                 {
-                    block.Status = BlockStatus.Confirmed;
-                    block.ConfirmationProgress = 1;
-                    
+                    decimal reward;
+
                     // not all Cryptonote coins are equal
                     switch(coin.Symbol)
                     {
                         case "ZEPH":
-                            ulong osirisHardForkBlock = ZephyrConstants.OsirisHardForkBlockMainnet;
-                            decimal miningReward = ZephyrConstants.MiningRewardInitial;
-                            decimal reserveReward = ZephyrConstants.ReserveRewardInitial;
-                            
-                            if(networkType == CryptonoteNetworkType.Test || networkType == CryptonoteNetworkType.Stage)
+                            // Zephyr: the header "reward" is the sum of every miner_tx output. The reserve (20 %, 30 % from HF 6)
+                            // and yield (5 % from HF 6) rewards are NOT outputs, the pre-HF-6 governance output (5 %) IS one, and
+                            // fees paid in other assets (ZSD/ZRS) are added as separate outputs. What the pool wallet actually
+                            // receives is exactly miner_tx.vout[0]; the old ratio formula credited 95 % of it on mainnet.
+                            var minerReward = await GetZephyrMinerRewardAsync(block.BlockHeight, ct);
+
+                            if(!minerReward.HasValue)
                             {
-                                if(networkType == CryptonoteNetworkType.Test)
-                                    osirisHardForkBlock = ZephyrConstants.OsirisHardForkBlockTestnet;
-                                else
-                                    osirisHardForkBlock = ZephyrConstants.OsirisHardForkBlockStagenet; 
-                                
-                                miningReward = ZephyrConstants.OsirisHardForkMiningReward;
-                                reserveReward = ZephyrConstants.OsirisHardForkReserveReward;
+                                logger.Warn(() => $"[{LogCategory}] Block {block.BlockHeight} is mature but its coinbase could not be read; leaving it pending until the next run");
+                                continue;
                             }
 
-                            if(block.BlockHeight >= osirisHardForkBlock)
-                                logger.Debug(() => $"[{LogCategory}] Osiris fork period detected...");
-
-                            block.Reward = (((blockHeader.Reward / coin.SmallestUnit) / (1m - reserveReward)) * miningReward) * coin.BlockrewardMultiplier;
+                            reward = (minerReward.Value / coin.SmallestUnit) * coin.BlockrewardMultiplier;
                             break;
                         default:
-                            block.Reward = (blockHeader.Reward / coin.SmallestUnit) * coin.BlockrewardMultiplier;
+                            reward = (blockHeader.Reward / coin.SmallestUnit) * coin.BlockrewardMultiplier;
                             break;
                     }
+
+                    block.Status = BlockStatus.Confirmed;
+                    block.ConfirmationProgress = 1;
+                    block.Reward = reward;
 
                     logger.Info(() => $"[{LogCategory}] Unlocked block {block.BlockHeight} worth {FormatAmount(block.Reward)}");
 

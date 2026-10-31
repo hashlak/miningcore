@@ -82,6 +82,11 @@ public abstract class StratumServer
     private readonly RecyclableMemoryStreamManager rmsm;
     protected readonly IMasterClock clock;
     protected ClusterConfig clusterConfig;
+
+    /// <summary>
+    /// Ban length for junk input / failed TLS handshakes: banning.junkReceiveBanTime seconds, default 3 minutes
+    /// </summary>
+    protected TimeSpan JunkReceiveBanTimeout => TimeSpan.FromSeconds(clusterConfig?.Banning?.JunkReceiveBanTime is > 0 ? clusterConfig.Banning.JunkReceiveBanTime.Value : 180);
     protected PoolConfig poolConfig;
     protected IBanManager banManager;
     protected ILogger logger;
@@ -228,7 +233,7 @@ public abstract class StratumServer
                 if(clusterConfig.Banning?.BanOnJunkReceive.HasValue == false || clusterConfig.Banning?.BanOnJunkReceive == true)
                 {
                     logger.Info(() => $"[{connection.ConnectionId}] Banning client for sending junk");
-                    banManager?.Ban(connection.RemoteEndpoint.Address, TimeSpan.FromMinutes(3));
+                    banManager?.Ban(connection.RemoteEndpoint.Address, JunkReceiveBanTimeout);
                 }
                 break;
 
@@ -239,7 +244,7 @@ public abstract class StratumServer
                 if(clusterConfig.Banning?.BanOnJunkReceive.HasValue == false || clusterConfig.Banning?.BanOnJunkReceive == true)
                 {
                     logger.Info(() => $"[{connection.ConnectionId}] Banning client for failing SSL handshake");
-                    banManager?.Ban(connection.RemoteEndpoint.Address, TimeSpan.FromMinutes(3));
+                    banManager?.Ban(connection.RemoteEndpoint.Address, JunkReceiveBanTimeout);
                 }
                 break;
 
@@ -252,7 +257,7 @@ public abstract class StratumServer
                     if(clusterConfig.Banning?.BanOnJunkReceive.HasValue == false || clusterConfig.Banning?.BanOnJunkReceive == true)
                     {
                         logger.Info(() => $"[{connection.ConnectionId}] Banning client for failing SSL handshake");
-                        banManager?.Ban(connection.RemoteEndpoint.Address, TimeSpan.FromMinutes(3));
+                        banManager?.Ban(connection.RemoteEndpoint.Address, JunkReceiveBanTimeout);
                     }
                 }
                 break;

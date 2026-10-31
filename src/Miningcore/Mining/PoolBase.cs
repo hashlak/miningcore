@@ -71,7 +71,7 @@ public abstract class PoolBase : StratumServer,
     protected readonly CompositeDisposable disposables = new();
     protected BlockchainStats blockchainStats;
     protected static readonly TimeSpan maxShareAge = TimeSpan.FromSeconds(6);
-    protected static readonly TimeSpan loginFailureBanTimeout = TimeSpan.FromSeconds(10);
+    protected TimeSpan loginFailureBanTimeout = TimeSpan.FromSeconds(10); // overridden from banning.loginFailureBanTime in Configure()
     protected static readonly Regex regexStaticDiff = new(@";?d=(\d*(\.\d+)?)", RegexOptions.Compiled);
     protected const string PasswordControlVarsSeparator = ";";
 
@@ -400,6 +400,9 @@ Pool Fee:               {(poolConfig.RewardRecipients?.Any() == true ? poolConfi
         logger = LogUtil.GetPoolScopedLogger(typeof(PoolBase), pc);
         poolConfig = pc;
         clusterConfig = cc;
+
+        if(cc.Banning?.LoginFailureBanTime is > 0)
+            loginFailureBanTimeout = TimeSpan.FromSeconds(cc.Banning.LoginFailureBanTime.Value);
     }
 
     public abstract double HashrateFromShares(double shares, double interval);
