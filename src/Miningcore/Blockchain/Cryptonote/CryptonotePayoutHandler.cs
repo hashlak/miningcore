@@ -52,8 +52,22 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
     private CryptonoteNetworkType? networkType;
     private CryptonotePoolPaymentProcessingConfigExtra extraConfig;
     private bool walletSupportsTransferSplit;
+    private string zephyrWalletAsset;   // asset name that carried the wallet balance in EnsureBalance (ZPH or ZEPH)
 
     protected override string LogCategory => "Cryptonote Payout Handler";
+
+    /// <summary>
+    /// Zephyr: spend the asset the balance was found under. wallet-rpc defaults both assets to ZPH, which fails with
+    /// "not enough money" on pre-v11 chains whose outputs are typed ZEPH (seen on the private testnet, 2026-10-31).
+    /// </summary>
+    private void ApplyZephyrAssets(TransferRequest request, CryptonoteCoinTemplate coin)
+    {
+        if(coin.Symbol != "ZEPH" || string.IsNullOrEmpty(zephyrWalletAsset))
+            return;
+
+        request.SourceAsset = zephyrWalletAsset;
+        request.ZephyrDestinationAsset = zephyrWalletAsset;
+    }
 
     private async Task<bool> HandleTransferResponseAsync(RpcResponse<TransferResponse> response, params Balance[] balances)
     {
@@ -238,6 +252,9 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                 {
                     unlockedBalance = assetBalance.UnlockedBalance / coin.SmallestUnit;
                     balance = assetBalance.Balance / coin.SmallestUnit;
+
+                    if(isZephyr)
+                        zephyrWalletAsset = assetBalance.Asset;
                 }
                 else
                     logger.Warn(() => $"[{LogCategory}] Wallet returned no balance entry for {string.Join("/", walletAssetNames)} (assets seen: {string.Join(",", entries.Select(x => x?.Asset ?? "?"))})");
@@ -327,6 +344,8 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
 
         if(request.Destinations.Length == 0)
             return true;
+
+        ApplyZephyrAssets(request, coin);
 
         logger.Info(() => $"[{LogCategory}] Paying {FormatAmount(balances.Sum(x => x.Amount))} to {balances.Length} addresses:\n{string.Join("\n", balances.OrderByDescending(x => x.Amount).Select(x => $"{FormatAmount(x.Amount)} to {x.Address}"))}");
 
@@ -431,6 +450,8 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
 
         if(!isIntegratedAddress)
             request.PaymentId = paymentId;
+
+        ApplyZephyrAssets(request, coin);
 
         if(!isIntegratedAddress)
             logger.Info(() => $"[{LogCategory}] Paying {FormatAmount(balance.Amount)} to address {balance.Address} with paymentId {paymentId}");
