@@ -29,7 +29,7 @@
 #define KEY "xelishash-pow-v3"
 #define BUFSIZE (MEMSIZE / 2)
 
-static inline void blake3(const uint8_t *input, int len, uint8_t *output) {
+static inline void xh3_blake3(const uint8_t *input, int len, uint8_t *output) {
 	blake3_hasher hasher;
 	blake3_hasher_init(&hasher);
 	blake3_hasher_update(&hasher, input, len);
@@ -49,30 +49,30 @@ static void stage1(const uint8_t *input, uint8_t scratch_pad[OUTPUT_SIZE]) {
 	uint8_t input_hash[HASH_SIZE];
 	uint8_t buffer[CHUNK_SIZE * 2];
 	memcpy(key, input, INPUT_LEN);
-	blake3(input, INPUT_LEN, buffer);
+	xh3_blake3(input, INPUT_LEN, buffer);
 
 	uint8_t *t = scratch_pad;
 
 	memcpy(buffer + CHUNK_SIZE, key + 0 * CHUNK_SIZE, CHUNK_SIZE);
-	blake3(buffer, CHUNK_SIZE * 2, input_hash);
+	xh3_blake3(buffer, CHUNK_SIZE * 2, input_hash);
 	chacha_encrypt(input_hash, buffer, NULL, t, OUTPUT_SIZE / CHUNKS, 8);
 
 	t += OUTPUT_SIZE / CHUNKS;
 	memcpy(buffer, input_hash, CHUNK_SIZE);
 	memcpy(buffer + CHUNK_SIZE, key + 1 * CHUNK_SIZE, CHUNK_SIZE);
-	blake3(buffer, CHUNK_SIZE * 2, input_hash);
+	xh3_blake3(buffer, CHUNK_SIZE * 2, input_hash);
 	chacha_encrypt(input_hash, t - NONCE_SIZE, NULL, t, OUTPUT_SIZE / CHUNKS, 8);
 
 	t += OUTPUT_SIZE / CHUNKS;
 	memcpy(buffer, input_hash, CHUNK_SIZE);
 	memcpy(buffer + CHUNK_SIZE, key + 2 * CHUNK_SIZE, CHUNK_SIZE);
-	blake3(buffer, CHUNK_SIZE * 2, input_hash);
+	xh3_blake3(buffer, CHUNK_SIZE * 2, input_hash);
 	chacha_encrypt(input_hash, t - NONCE_SIZE, NULL, t, OUTPUT_SIZE / CHUNKS, 8);
 
 	t += OUTPUT_SIZE / CHUNKS;
 	memcpy(buffer, input_hash, CHUNK_SIZE);
 	memcpy(buffer + CHUNK_SIZE, key + 3 * CHUNK_SIZE, CHUNK_SIZE);
-	blake3(buffer, CHUNK_SIZE * 2, input_hash);
+	xh3_blake3(buffer, CHUNK_SIZE * 2, input_hash);
 	chacha_encrypt(input_hash, t - NONCE_SIZE, NULL, t, OUTPUT_SIZE / CHUNKS, 8);
 }
 
@@ -303,7 +303,7 @@ static void xelis_hash_v3_scratch(const uint8_t in[INPUT_LEN], uint8_t hash[HASH
 
 	stage1(in, scratch_uint8);
 	stage3(scratch);
-	blake3(scratch_uint8, OUTPUT_SIZE, hash);
+	xh3_blake3(scratch_uint8, OUTPUT_SIZE, hash);
 }
 
 /* libmultihash entry point (exports.cpp: xelis_hash_v3_export). Thread-local scratchpad: Miningcore hashes shares from
