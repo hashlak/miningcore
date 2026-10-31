@@ -79,4 +79,13 @@ public class TransferRequest
     /// </summary>
     [JsonProperty("dest_asset", NullValueHandling = NullValueHandling.Ignore)]
     public string DestinationAsset { get; set; }
+
+    // Zephyr
+    /// <summary>
+    /// Zephyr's wallet-rpc names the field destination_asset and requires it together with source_asset. Without both
+    /// the wallet spends its default asset ZPH, which does not exist on chains that never reached hard fork v11
+    /// (testnet/stagenet outputs are typed ZEPH) -> "not enough money".
+    /// </summary>
+    [JsonProperty("destination_asset", NullValueHandling = NullValueHandling.Ignore)]
+    public string ZephyrDestinationAsset { get; set; }
 }
