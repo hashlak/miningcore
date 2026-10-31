@@ -28,7 +28,15 @@ public class IntegratedBanManager : IBanManager
         if(address.Equals(IPAddress.Loopback) || address.Equals(IPAddress.IPv6Loopback))
             return;
 
-        cache.Set(address.ToString(), string.Empty, duration);
+        // never shorten an active ban: a second connection sending one junk line must not replace a 600 s invalid-share ban
+        // with the (shorter) junk window
+        var key = address.ToString();
+        var expiresAt = DateTime.UtcNow + duration;
+
+        if(cache.TryGetValue<DateTime>(key, out var existing) && existing > expiresAt)
+            return;
+
+        cache.Set(key, expiresAt, duration);
     }
 
     #endregion

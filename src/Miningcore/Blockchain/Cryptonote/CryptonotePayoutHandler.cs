@@ -143,9 +143,10 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
     /// Zephyr: amount of the miner's own coinbase output (miner_tx.vout[0]) in atomic units, read via get_block.
     /// Returns null when the daemon or the block JSON cannot be read - callers must leave the block pending, never estimate.
     /// </summary>
-    private async Task<decimal?> GetZephyrMinerRewardAsync(ulong height, CancellationToken ct)
+    private async Task<decimal?> GetZephyrMinerRewardAsync(ulong height, string hash, ulong headerReward, CancellationToken ct)
     {
-        var response = await rpcClient.ExecuteAsync<GetBlockResponse>(logger, CNC.GetBlock, ct, new GetBlockRequest { Height = height });
+        // by hash: the coinbase must belong to the exact block whose orphan status was just checked
+        var response = await rpcClient.ExecuteAsync<GetBlockResponse>(logger, CNC.GetBlock, ct, new GetBlockRequest { Hash = hash });
 
         if(response.Error != null)
         {
@@ -161,16 +162,34 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
 
         try
         {
+            // testnet HF 3 and mainnet HF 11 both serialize outputs as
+            // {"amount": <integer>, "target": {"tagged_key": {"key": "..", "asset_type": "ZEPH"|"ZPH", "view_tag": ".."}}}
             var vout = JObject.Parse(response.Response.Json)["miner_tx"]?["vout"] as JArray;
-            var amount = vout?.FirstOrDefault()?["amount"]?.Value<ulong>();
+            var first = vout?.FirstOrDefault() as JObject;
+            var amountToken = first?["amount"];
 
-            if(amount is null or 0)
+            if(amountToken == null || amountToken.Type != JTokenType.Integer)
             {
-                logger.Warn(() => $"[{LogCategory}] Block {height}: miner_tx.vout[0].amount is missing or zero");
+                logger.Warn(() => $"[{LogCategory}] Block {height}: miner_tx.vout[0].amount is missing or not an integer (outputs: {vout?.Count ?? 0})");
                 return null;
             }
 
-            return amount.Value;
+            var amount = amountToken.Value<ulong>();
+            var assetType = (first["target"] as JObject)?.Properties().FirstOrDefault()?.Value?["asset_type"]?.Value<string>();
+
+            if(amount == 0 || amount > headerReward)
+            {
+                logger.Warn(() => $"[{LogCategory}] Block {height}: vout[0].amount {amount} is zero or exceeds the header reward {headerReward}");
+                return null;
+            }
+
+            if(string.IsNullOrEmpty(assetType) || !ZephyrConstants.WalletAssetNames.Contains(assetType))
+            {
+                logger.Warn(() => $"[{LogCategory}] Block {height}: vout[0] asset '{assetType ?? "?"}' is not the base coin; refusing to credit it");
+                return null;
+            }
+
+            return amount;
         }
 
         catch(Exception ex)
@@ -205,8 +224,14 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                     return false;
                 }
 
+                // first name with coins wins (a wallet may list ZPH with 0 next to a funded ZEPH on pre-v11 chains);
+                // with nothing funded, the first present entry is used. Never summed.
+                var entries = responseBalances.Response?.Balances ?? Array.Empty<BalanceAsset>();
                 var assetBalance = walletAssetNames
-                    .Select(name => responseBalances.Response?.Balances?.FirstOrDefault(x => x.Asset == name))
+                    .Select(name => entries.FirstOrDefault(x => x?.Asset == name && (x.Balance > 0 || x.UnlockedBalance > 0)))
+                    .FirstOrDefault(x => x != null)
+                    ?? walletAssetNames
+                    .Select(name => entries.FirstOrDefault(x => x?.Asset == name))
                     .FirstOrDefault(x => x != null);
 
                 if(assetBalance != null)
@@ -215,7 +240,7 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                     balance = assetBalance.Balance / coin.SmallestUnit;
                 }
                 else
-                    logger.Warn(() => $"[{LogCategory}] Wallet returned no balance entry for {string.Join("/", walletAssetNames)} (assets seen: {string.Join(",", responseBalances.Response?.Balances?.Select(x => x.Asset) ?? Array.Empty<string>())})");
+                    logger.Warn(() => $"[{LogCategory}] Wallet returned no balance entry for {string.Join("/", walletAssetNames)} (assets seen: {string.Join(",", entries.Select(x => x?.Asset ?? "?"))})");
                 break;
             default:
                 var responseBalance = await rpcClientWallet.ExecuteAsync<GetBalanceResponse>(logger, CryptonoteWalletCommands.GetBalance, ct);
@@ -489,6 +514,12 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
         var pageCount = (int) Math.Ceiling(blocks.Length / (double) pageSize);
         var result = new List<Block>();
 
+        // Lowest height first, and once a block cannot be evaluated no higher block is confirmed in this run:
+        // the PPLNS scheme deletes shares up to each confirmed block's cutoff, which would eat the share window
+        // of the older block that is still pending (hashlak 2026-10-31).
+        blocks = blocks.OrderBy(x => x.BlockHeight).ToArray();
+        var holdHigherBlocks = false;
+
         for(var i = 0; i < pageCount; i++)
         {
             // get a page full of blocks
@@ -502,6 +533,9 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
             {
                 var block = page[j];
 
+                if(holdHigherBlocks)
+                    continue;
+
                 var rpcResult = await rpcClient.ExecuteAsync<GetBlockHeaderResponse>(logger,
                     CNC.GetBlockHeaderByHeight, ct,
                     new GetBlockHeaderByHeightRequest
@@ -512,12 +546,14 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                 if(rpcResult.Error != null)
                 {
                     logger.Debug(() => $"[{LogCategory}] Daemon reports error '{rpcResult.Error.Message}' (Code {rpcResult.Error.Code}) for block {block.BlockHeight}");
+                    holdHigherBlocks = true;
                     continue;
                 }
 
                 if(rpcResult.Response?.BlockHeader == null)
                 {
                     logger.Debug(() => $"[{LogCategory}] Daemon returned no header for block {block.BlockHeight}");
+                    holdHigherBlocks = true;
                     continue;
                 }
 
@@ -552,11 +588,16 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                             // and yield (5 % from HF 6) rewards are NOT outputs, the pre-HF-6 governance output (5 %) IS one, and
                             // fees paid in other assets (ZSD/ZRS) are added as separate outputs. What the pool wallet actually
                             // receives is exactly miner_tx.vout[0]; the old ratio formula credited 95 % of it on mainnet.
-                            var minerReward = await GetZephyrMinerRewardAsync(block.BlockHeight, ct);
+                            var minerReward = await GetZephyrMinerRewardAsync(block.BlockHeight, blockHeader.Hash, blockHeader.Reward, ct);
 
                             if(!minerReward.HasValue)
                             {
-                                logger.Warn(() => $"[{LogCategory}] Block {block.BlockHeight} is mature but its coinbase could not be read; leaving it pending until the next run");
+                                if(blockHeader.Depth > 2 * CryptonoteConstants.PayoutMinBlockConfirmations)
+                                    logger.Error(() => $"[{LogCategory}] Block {block.BlockHeight} has been mature for {blockHeader.Depth} confirmations and still cannot be credited - payouts for this pool are stalled, investigate the daemon");
+                                else
+                                    logger.Warn(() => $"[{LogCategory}] Block {block.BlockHeight} is mature but its coinbase could not be read; leaving it pending until the next run");
+
+                                holdHigherBlocks = true;
                                 continue;
                             }
 
