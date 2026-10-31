@@ -483,3 +483,11 @@ extern "C" MODULE_API void xelis_hash_v2_export(const unsigned char *input, unsi
 {
     xelis_hash_v2(input, input_len, output);
 }
+
+// xelishash/xelishashv3.c (C linkage): 112-byte miner work in, 32-byte hash out
+extern "C" void xelis_hash_v3(const unsigned char *input, uint32_t inputLen, unsigned char *hashResult);
+
+extern "C" MODULE_API void xelis_hash_v3_export(const unsigned char *input, unsigned char *output, uint32_t input_len)
+{
+    xelis_hash_v3(input, input_len, output);
+}

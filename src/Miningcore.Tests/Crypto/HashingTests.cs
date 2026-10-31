@@ -28,6 +28,22 @@ public class HashingTests : TestBase
     }
 
     [Fact]
+    public void XelisHashV3_Hash()
+    {
+        // xelis-hash src/v3.rs test_zero_hash: 112 zero bytes
+        var hasher = new XelisHashV3();
+        var hash = new byte[32];
+        hasher.Digest(new byte[112], hash);
+        var result = hash.ToHexString();
+
+        Assert.Equal("69ac67285efd5ca22afc05c4ecee5bda169de4e9ef08fa39d4a6798494cd67a3", result);
+
+        // second run on the same (dirty) thread-local scratchpad must match too
+        hasher.Digest(new byte[112], hash);
+        Assert.Equal("69ac67285efd5ca22afc05c4ecee5bda169de4e9ef08fa39d4a6798494cd67a3", hash.ToHexString());
+    }
+
+    [Fact]
     public void Blake2s_Hash()
     {
         var hasher = new Blake2s();

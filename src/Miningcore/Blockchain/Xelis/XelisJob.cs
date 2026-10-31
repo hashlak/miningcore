@@ -24,6 +24,7 @@ public class XelisJob
     protected readonly IHashAlgorithm blake3Hasher = new Blake3();
     protected readonly IHashAlgorithm xelisHash = new XelisHash();
     protected readonly IHashAlgorithm xelisHashV2 = new XelisHashV2();
+    protected readonly IHashAlgorithm xelisHashV3 = new XelisHashV3();
 
     protected readonly ConcurrentDictionary<string, bool> submissions = new(StringComparer.OrdinalIgnoreCase);
     public byte[] blockTargetBytes { get; protected set; }
@@ -104,10 +105,18 @@ public class XelisJob
         var coinbaseBytes = SerializeCoinbase(extranonceBytes, nonceBytes);
         Span<byte> hashCoinbaseBytes = stackalloc byte[XelisConstants.HashSize];
 
-        if(BlockTemplate.Algorithm == XelisConstants.AlgorithmXelisHashV2)
-            xelisHashV2.Digest(coinbaseBytes, hashCoinbaseBytes);
-        else
-            xelisHash.Digest(coinbaseBytes, hashCoinbaseBytes);
+        switch(BlockTemplate.Algorithm)
+        {
+            case XelisConstants.AlgorithmXelisHashV3:
+                xelisHashV3.Digest(coinbaseBytes, hashCoinbaseBytes);
+                break;
+            case XelisConstants.AlgorithmXelisHashV2:
+                xelisHashV2.Digest(coinbaseBytes, hashCoinbaseBytes);
+                break;
+            default:
+                xelisHash.Digest(coinbaseBytes, hashCoinbaseBytes);
+                break;
+        }
 
         var targetHashCoinbaseBytes = new Target(new BigInteger(hashCoinbaseBytes, true, true));
         var hashCoinbaseBytesValue = targetHashCoinbaseBytes.ToUInt256();
