@@ -35,7 +35,7 @@ OBJECTS = bcrypt.o blake.o c11.o dcrypt.o fresh.o lane.o \
         flex/cryptonote/cryptonight.o flex/cryptonote/cryptonight_dark.o flex/cryptonote/cryptonight_dark_lite.o flex/cryptonote/cryptonight_fast.o \
         flex/cryptonote/cryptonight_lite.o flex/cryptonote/cryptonight_soft_shell.o flex/cryptonote/cryptonight_turtle.o flex/cryptonote/cryptonight_turtle_lite.o \
         flex/flex.o \
-        chacha20/chacha20.o xelishash/xelishashv1.o xelishash/xelishashv2.o 
+        chacha20/chacha20.o xelishash/xelishashv1.o xelishash/xelishashv2.o xelishash/xelishashv3.o
 
 all: $(TARGET)
 

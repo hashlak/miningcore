@@ -38,6 +38,7 @@ public static class XelisConstants
     public const int BlockWorkSize = 112;
 
     public const string AlgorithmXelisHashV2 = "xel/v2";
+    public const string AlgorithmXelisHashV3 = "xel/v3";   // get_block_template.algorithm on mainnet since 2025-12-14 and on testnet (verified 2026-10-31)
 
     // Amount in ATOMIC (per KB)
     public const decimal MinimumTransactionFees = 1000;

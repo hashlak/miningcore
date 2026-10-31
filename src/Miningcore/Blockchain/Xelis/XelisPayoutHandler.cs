@@ -114,7 +114,15 @@ public class XelisPayoutHandler : PayoutHandlerBase,
         {
             logger.Warn(() => $"[{LogCategory}] '{XelisWalletCommands.DaemonName}' is offline...");
 
-            var setOnlineMode = await rpcClientWallet.ExecuteAsync<object>(logger, XelisWalletCommands.SetOnlineMode, ct);
+            // xelis_wallet 1.25: set_online_mode REQUIRES daemon_address ("Invalid params: missing field `daemon_address`");
+            // point the wallet at the pool's own daemon endpoint (hashlak 2026-10-31)
+            var daemon = daemonEndpoints.First();
+            var setOnlineModeRequest = new SetOnlineModeRequest
+            {
+                DaemonAddress = $"{(daemon.Ssl ? "https" : "http")}://{daemon.Host}:{daemon.Port}"
+            };
+
+            var setOnlineMode = await rpcClientWallet.ExecuteAsync<object>(logger, XelisWalletCommands.SetOnlineMode, ct, setOnlineModeRequest);
             if(setOnlineMode.Error != null)
                 throw new Exception($"'{XelisWalletCommands.SetOnlineMode}': {setOnlineMode.Error.Message} (Code {setOnlineMode.Error.Code})");
 
