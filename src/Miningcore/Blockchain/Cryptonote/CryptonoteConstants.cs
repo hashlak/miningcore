@@ -50,6 +50,11 @@ public static class ScalaConstants
 public static class ZephyrConstants
 {
     public const int BlobType = 13;
+    // Wallet asset names of the base coin: "ZPH" since hard fork v11 (mainnet 536000), "ZEPH" before it
+    // (testnet/stagenet never fork past v3). Order matters: the first name with a balance entry wins; never sum both.
+    public static readonly string[] WalletAssetNames = { "ZPH", "ZEPH" };
+    // The ratio constants below are NOT used for payouts any more (hashlak, 2026-10-31): the miner's reward is read from
+    // miner_tx.vout[0] via get_block (CryptonotePayoutHandler.GetZephyrMinerRewardAsync), exact on every network and fork.
     // ZEPH Block reward distribution
     // https://medium.com/@zephyrcurrencyprotocol/zephyr-protocol-tokenomics-information-3f83531f453a
     public const ulong OsirisHardForkBlockMainnet = 89300;
@@ -71,6 +76,7 @@ public static class CryptonoteCommands
     public const string SubmitBlock = "submitblock";
     public const string GetBlockHeaderByHash = "getblockheaderbyhash";
     public const string GetBlockHeaderByHeight = "getblockheaderbyheight";
+    public const string GetBlock = "get_block";
 }
 
 public static class CryptonoteWalletCommands
