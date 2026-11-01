@@ -65,7 +65,49 @@ public abstract class PayoutHandlerBase
     protected PoolConfig poolConfig;
     private const int RetryCount = 8;
 
+    /// <summary>hashlak payout guard: the reserved run for the PayoutAsync in progress (null = legacy, guard disabled)</summary>
+    protected PayoutRunContext payoutRun;
+
     protected abstract string LogCategory { get; }
+
+    public void BeginPayoutRun(PayoutRunContext run)
+    {
+        payoutRun = run;
+    }
+
+    public virtual Task<WalletBalance> GetWalletBalanceAsync(CancellationToken ct)
+    {
+        return Task.FromResult<WalletBalance>(null);
+    }
+
+    public virtual decimal NormalizePayoutAmount(decimal amount)
+    {
+        return amount;
+    }
+
+    /// <summary>
+    /// hashlak payout guard: JSON-RPC error codes this handler's wallet raises BEFORE anything is signed or relayed
+    /// (bad address, insufficient funds, locked wallet …). Only those let the guard re-credit a payee; every other
+    /// error from a send is treated as "coins may have left". Default: none.
+    /// </summary>
+    protected virtual bool IsNotSentErrorCode(int rpcErrorCode)
+    {
+        return false;
+    }
+
+    /// <summary>
+    /// hashlak payout guard: these payees are certainly NOT paid in this run (pre-check failed, page skipped, wallet locked …);
+    /// the guard re-credits them when the run is finalized. Use NotifyPayoutFailure when the node was actually asked to send.
+    /// </summary>
+    protected void NotifyPayoutNotSent(Balance[] balances, string reason)
+    {
+        if(balances == null || balances.Length == 0)
+            return;
+
+        payoutRun?.Reject(balances, reason);
+
+        logger.Info(() => $"[{LogCategory}] Not paying {balances.Length} address(es) this run: {reason}");
+    }
 
     protected void BuildFaultHandlingPolicy()
     {
@@ -136,10 +178,17 @@ public abstract class PayoutHandlerBase
                             await paymentRepo.InsertAsync(con, tx, payment);
                         }
 
-                        // reset balance
-                        logger.Info(() => $"[{LogCategory}] Resetting balance of {balance.Address}");
-                        await balanceRepo.AddAmountAsync(con, tx, poolConfig.Id, balance.Address, -balance.Amount, "Balance reset after payment");
+                        if(payoutRun == null)
+                        {
+                            // reset balance (legacy path: the guard is disabled for this pool)
+                            logger.Info(() => $"[{LogCategory}] Resetting balance of {balance.Address}");
+                            await balanceRepo.AddAmountAsync(con, tx, poolConfig.Id, balance.Address, -balance.Amount, "Balance reset after payment");
+                        }
                     }
+
+                    // hashlak payout guard: the balances were debited when the run was reserved — confirm the items instead
+                    if(payoutRun != null)
+                        await payoutRun.ConfirmAsync(con, tx, balances.Select(x => (x.Address, transactionConfirmation, x.Amount)).ToArray());
                 });
             });
         }
@@ -185,10 +234,17 @@ public abstract class PayoutHandlerBase
                             await paymentRepo.InsertAsync(con, tx, payment);
                         }
 
-                        // reset balance
-                        logger.Info(() => $"[{LogCategory}] Resetting balance of {balance.Address}");
-                        await balanceRepo.AddAmountAsync(con, tx, poolConfig.Id, balance.Address, -balance.Amount, "Balance reset after payment");
+                        if(payoutRun == null)
+                        {
+                            // reset balance (legacy path: the guard is disabled for this pool)
+                            logger.Info(() => $"[{LogCategory}] Resetting balance of {balance.Address}");
+                            await balanceRepo.AddAmountAsync(con, tx, poolConfig.Id, balance.Address, -balance.Amount, "Balance reset after payment");
+                        }
                     }
+
+                    // hashlak payout guard: the balances were debited when the run was reserved — confirm the items instead
+                    if(payoutRun != null)
+                        await payoutRun.ConfirmAsync(con, tx, balances.Select(x => (x.Key.Address, x.Value, x.Key.Amount)).ToArray());
                 });
             });
         }
@@ -224,9 +280,23 @@ public abstract class PayoutHandlerBase
         messageBus.SendMessage(new PaymentNotification(poolId, null, balances.Sum(x => x.Amount), coin.Symbol, balances.Length, txHashes, explorerLinks, txFee));
     }
 
-    protected virtual void NotifyPayoutFailure(string poolId, Balance[] balances, string error, Exception ex)
+    /// <summary>
+    /// Reports a failed send. hashlak payout guard: <paramref name="rpcErrorCode"/> is the node's JSON-RPC error code when
+    /// the node answered — an explicit error means the coins did not leave and the payees are re-credited; a transport
+    /// error (-500), an exception or no code at all leaves them unresolved and trips the breaker.
+    /// </summary>
+    protected virtual void NotifyPayoutFailure(string poolId, Balance[] balances, string error, Exception ex, int? rpcErrorCode = null)
     {
         var coin = poolConfig.Template.As<CoinTemplate>();
+
+        if(payoutRun != null && balances != null)
+        {
+            // a wallet rejection of a send is re-credited AND trips the breaker (a human looks before the next send)
+            if(PayoutGuardPolicy.Classify(rpcErrorCode, ex, IsNotSentErrorCode) == PayoutFailureKind.Rejected)
+                payoutRun.RejectBySend(balances, error ?? ex?.Message);
+            else
+                payoutRun.Unresolved(balances, error ?? ex?.Message);
+        }
 
         messageBus.SendMessage(new PaymentNotification(poolId, error ?? ex?.Message, balances.Sum(x => x.Amount), coin.Symbol));
     }

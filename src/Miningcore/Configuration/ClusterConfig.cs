@@ -1126,12 +1126,42 @@ public partial class PoolShareBasedBanningConfig
     public int? MinerEffortTime { get; set; } // How many seconds to ban worker for
 }
 
+/// <summary>
+/// hashlak payout guard settings (paymentProcessing.guard, see Payments/PayoutGuard.cs). A typed property on purpose:
+/// a malformed block fails the configuration load, a missing block leaves the pool tripped — never a silent default.
+/// </summary>
+public class PayoutGuardConfig
+{
+    /// <summary>false = upstream behaviour (debit after broadcast). Never on mainnet.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>false = reserve nothing, pay nothing (mainnet pools until the owner's go).</summary>
+    public bool PayoutsEnabled { get; set; } = true;
+
+    /// <summary>Largest amount one address receives per run, in pool-base-currency; the rest waits for the next run.</summary>
+    public decimal PerPayoutCap { get; set; }
+
+    /// <summary>Hard ceiling on Σ reserved in any rolling 24 h; crossing it trips the breaker.</summary>
+    public decimal DailyCap { get; set; }
+
+    /// <summary>What one confirmed block credits to miners (pool-base-currency); the credit-anomaly check scales with it.</summary>
+    public decimal NominalBlockReward { get; set; }
+
+    /// <summary>Credits in 24 h above blocks × nominalBlockReward × this multiplier trip the breaker.</summary>
+    public decimal CreditMultiplier { get; set; } = 1.2m;
+}
+
 public partial class PoolPaymentProcessingConfig
 {
     public bool Enabled { get; set; }
     public decimal MinimumPayment { get; set; } // in pool-base-currency (ie. Bitcoin, not Satoshis)
     public PayoutScheme PayoutScheme { get; set; }
     public JToken PayoutSchemeConfig { get; set; }
+
+    /// <summary>
+    /// hashlak payout guard; null = the pool is tripped at runtime ("guard config missing")
+    /// </summary>
+    public PayoutGuardConfig Guard { get; set; }
 
     /// <summary>
     /// Arbitrary extension data
@@ -1144,6 +1174,12 @@ public partial class ClusterPaymentProcessingConfig
 {
     public bool Enabled { get; set; }
     public int Interval { get; set; }
+
+    /// <summary>
+    /// hashlak: a pool with paymentProcessing.guard.enabled = false (upstream send-then-debit) is refused unless this
+    /// cluster-wide flag says so explicitly — never on a mainnet cluster.
+    /// </summary>
+    public bool AllowUnguardedPools { get; set; }
 
     /// <summary>
     /// Indentifier used in coinbase transactions to identify the pool

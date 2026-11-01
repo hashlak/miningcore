@@ -89,7 +89,7 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
         {
             logger.Error(() => $"[{LogCategory}] Daemon command '{CryptonoteWalletCommands.Transfer}' returned error: {response.Error.Message} code {response.Error.Code}");
 
-            NotifyPayoutFailure(poolConfig.Id, balances, $"Daemon command '{CryptonoteWalletCommands.Transfer}' returned error: {response.Error.Message} code {response.Error.Code}", null);
+            NotifyPayoutFailure(poolConfig.Id, balances, $"Daemon command '{CryptonoteWalletCommands.Transfer}' returned error: {response.Error.Message} code {response.Error.Code}", null, response.Error.Code);
             return false;
         }
     }
@@ -114,6 +114,8 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
         {
             logger.Error(() => $"[{LogCategory}] Daemon command '{CryptonoteWalletCommands.TransferSplit}' returned error: {response.Error.Message} code {response.Error.Code}");
 
+            // hashlak: transfer_split commits its transactions one by one — one error code for the whole request says
+            // nothing about how many already left; no code is passed, so the guard treats every payee as unresolved
             NotifyPayoutFailure(poolConfig.Id, balances, $"Daemon command '{CryptonoteWalletCommands.TransferSplit}' returned error: {response.Error.Message} code {response.Error.Code}", null);
             return false;
         }
@@ -215,6 +217,50 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
 
     private async Task<bool> EnsureBalance(decimal requiredAmount, CryptonoteCoinTemplate coin, CancellationToken ct)
     {
+        var wallet = await ReadWalletBalanceAsync(coin, ct);
+
+        if(wallet == null)
+            return false;
+
+        if(wallet.Unlocked < requiredAmount)
+        {
+            logger.Info(() => $"[{LogCategory}] {FormatAmount(requiredAmount)} unlocked balance required for payment, but only have {FormatAmount(wallet.Unlocked.Value)} of {FormatAmount(wallet.Total)} available yet. Will try again.");
+            return false;
+        }
+
+        logger.Info(() => $"[{LogCategory}] Current balance is {FormatAmount(wallet.Unlocked.Value)}");
+        return true;
+    }
+
+    // hashlak payout guard: the same wallet query serves the guard's hot-wallet check (null = RPC error)
+    public override Task<WalletBalance> GetWalletBalanceAsync(CancellationToken ct)
+    {
+        return ReadWalletBalanceAsync(poolConfig.Template.As<CryptonoteCoinTemplate>(), ct);
+    }
+
+    // the wallet receives Math.Floor(amount × SmallestUnit): reserve exactly that
+    public override decimal NormalizePayoutAmount(decimal amount)
+    {
+        var unit = poolConfig.Template.As<CryptonoteCoinTemplate>().SmallestUnit;
+
+        return Math.Floor(amount * unit) / unit;
+    }
+
+    // wallet-rpc errors raised before signing (wallet_rpc_server_error_codes.h): WRONG_ADDRESS -2, WRONG_PAYMENT_ID -5,
+    // TX_NOT_POSSIBLE -16, NOT_ENOUGH_MONEY -17, ZERO_DESTINATION -20. The generic -4 and everything else may have relayed.
+    protected override bool IsNotSentErrorCode(int rpcErrorCode)
+    {
+        return rpcErrorCode is -2 or -5 or -16 or -17 or -20;
+    }
+
+    private static bool IsTooLargeError(string message)
+    {
+        return !string.IsNullOrEmpty(message) &&
+            (message.Contains("too big", StringComparison.OrdinalIgnoreCase) || message.Contains("too large", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<WalletBalance> ReadWalletBalanceAsync(CryptonoteCoinTemplate coin, CancellationToken ct)
+    {
         decimal unlockedBalance = 0.0m;
         decimal balance = 0.0m;
 
@@ -235,7 +281,7 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                 if(responseBalances.Error != null)
                 {
                     logger.Error(() => $"[{LogCategory}] Daemon command '{CryptonoteWalletCommands.GetBalance}' returned error: {responseBalances.Error.Message} code {responseBalances.Error.Code}");
-                    return false;
+                    return null;
                 }
 
                 // first name with coins wins (a wallet may list ZPH with 0 next to a funded ZEPH on pre-v11 chains);
@@ -265,22 +311,15 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                 if(responseBalance.Error != null)
                 {
                     logger.Error(() => $"[{LogCategory}] Daemon command '{CryptonoteWalletCommands.GetBalance}' returned error: {responseBalance.Error.Message} code {responseBalance.Error.Code}");
-                    return false;
+                    return null;
                 }
-                
+
                 unlockedBalance = responseBalance.Response.UnlockedBalance / coin.SmallestUnit;
                 balance = responseBalance.Response.Balance / coin.SmallestUnit;
                 break;
         }
 
-        if(unlockedBalance < requiredAmount)
-        {
-            logger.Info(() => $"[{LogCategory}] {FormatAmount(requiredAmount)} unlocked balance required for payment, but only have {FormatAmount(unlockedBalance)} of {FormatAmount(balance)} available yet. Will try again.");
-            return false;
-        }
-
-        logger.Info(() => $"[{LogCategory}] Current balance is {FormatAmount(unlockedBalance)}");
-        return true;
+        return new WalletBalance(balance, unlockedBalance);
     }
 
     private async Task<bool> PayoutBatch(Balance[] balances, CancellationToken ct)
@@ -289,7 +328,10 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
 
         // ensure there's enough balance
         if(!await EnsureBalance(balances.Sum(x => x.Amount), coin, ct))
+        {
+            NotifyPayoutNotSent(balances, "wallet balance unavailable or unlocked balance short");
             return false;
+        }
 
         TransferRequest request;
 
@@ -353,7 +395,9 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
         var transferResponse = await rpcClientWallet.ExecuteAsync<TransferResponse>(logger, CryptonoteWalletCommands.Transfer, ct, request);
 
         // gracefully handle error -4 (transaction would be too large. try /transfer_split)
-        if(transferResponse.Error?.Code == -4)
+        // hashlak: -4 is the wallet's GENERIC transfer error; only retry when the message really says the tx is too big,
+        // otherwise a second send would follow an error whose transaction may already have been relayed
+        if(transferResponse.Error?.Code == -4 && IsTooLargeError(transferResponse.Error.Message))
         {
             if(walletSupportsTransferSplit)
             {
@@ -401,7 +445,10 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
 
         // ensure there's enough balance
         if(!await EnsureBalance(balance.Amount, coin, ct))
+        {
+            NotifyPayoutNotSent(new[] { balance }, "wallet balance unavailable or unlocked balance short");
             return false;
+        }
 
         TransferRequest request;
 
@@ -463,12 +510,17 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
 
         if(walletSupportsTransferSplit)
         {
-            // gracefully handle error -4 (transaction would be too large. try /transfer_split)
-            if(result.Error?.Code == -4)
+            // gracefully handle error -4 (transaction would be too large. try /transfer_split) — hashlak: only when the
+            // message says so (see PayoutBatch)
+            if(result.Error?.Code == -4 && IsTooLargeError(result.Error.Message))
             {
                 logger.Info(() => $"[{LogCategory}] Retrying transfer using {CryptonoteWalletCommands.TransferSplit}");
 
-                result = await rpcClientWallet.ExecuteAsync<TransferResponse>(logger, CryptonoteWalletCommands.TransferSplit, ct, request);
+                // hashlak: transfer_split answers with tx_hash_list, not tx_hash — reading it as TransferResponse left the
+                // transaction id null, so the payment was sent but never persisted (and would have been paid again)
+                var splitResult = await rpcClientWallet.ExecuteAsync<TransferSplitResponse>(logger, CryptonoteWalletCommands.TransferSplit, ct, request);
+
+                return await HandleTransferResponseAsync(splitResult, balance);
             }
         }
 
@@ -666,10 +718,13 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                 infoResponse.Response.IncomingConnectionsCount + infoResponse.Response.OutgoingConnectionsCount < 2)
             {
                 logger.Warn(() => $"[{LogCategory}] Payout aborted. Not enough peers (4 required)");
+                NotifyPayoutNotSent(balances, "not enough peers");
                 return;
             }
 #endif
         // validate addresses
+        var requested = balances;
+
         balances = balances
             .Where(x =>
             {
@@ -718,6 +773,9 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
             })
             .ToArray();
 
+        // hashlak payout guard: excluded addresses are certainly not paid this run
+        NotifyPayoutNotSent(requested.Except(balances).ToArray(), "invalid address for this network");
+
         // simple balances first
         var simpleBalances = balances
             .Where(x =>
@@ -765,21 +823,32 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                     .ToArray();
 
                 if(!await PayoutBatch(page, ct))
+                {
+                    // hashlak payout guard: the pages that were never attempted are certainly not paid
+                    NotifyPayoutNotSent(simpleBalances.Skip((i + 1) * pageSize).ToArray(), "previous batch failed");
                     break;
+                }
             }
         }
 #endif
         // balances with paymentIds
         var minimumPaymentToPaymentId = extraConfig?.MinimumPaymentToPaymentId ?? poolConfig.PaymentProcessing.MinimumPayment;
 
-        var paymentIdBalances = balances.Except(simpleBalances)
+        var paymentIdCandidates = balances.Except(simpleBalances).ToArray();
+
+        var paymentIdBalances = paymentIdCandidates
             .Where(x => x.Amount >= minimumPaymentToPaymentId)
             .ToArray();
 
-        foreach(var balance in paymentIdBalances)
+        NotifyPayoutNotSent(paymentIdCandidates.Except(paymentIdBalances).ToArray(), "below minimumPaymentToPaymentId");
+
+        for(var i = 0; i < paymentIdBalances.Length; i++)
         {
-            if(!await PayoutToPaymentId(balance, ct))
+            if(!await PayoutToPaymentId(paymentIdBalances[i], ct))
+            {
+                NotifyPayoutNotSent(paymentIdBalances.Skip(i + 1).ToArray(), "previous transfer failed");
                 break;
+            }
         }
 
         // save wallet

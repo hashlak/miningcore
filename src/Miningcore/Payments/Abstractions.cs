@@ -16,6 +16,16 @@ public interface IPayoutHandler
     double AdjustBlockEffort(double effort);
 
     string FormatAmount(decimal amount);
+
+    // hashlak payout guard (Payments/PayoutGuard.cs): the manager hands the reserved run to the handler before
+    // PayoutAsync; the handler reports the hot wallet balance and rounds amounts the way its node will send them
+    void BeginPayoutRun(PayoutRunContext run)
+    {
+    }
+
+    Task<WalletBalance> GetWalletBalanceAsync(CancellationToken ct) => Task.FromResult<WalletBalance>(null);
+
+    decimal NormalizePayoutAmount(decimal amount) => amount;
 }
 
 public interface IPayoutScheme

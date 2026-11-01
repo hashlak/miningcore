@@ -248,7 +248,10 @@ public class XelisPayoutHandler : PayoutHandlerBase,
         // ensure we have enough peers
         var enoughPeers = await EnsureDaemonsSynchedAsync(ct);
         if(!enoughPeers)
+        {
+            NotifyPayoutNotSent(balances, "daemon not synced or no peers");
             return;
+        }
 
         // build args
         var amounts = balances
@@ -263,27 +266,53 @@ public class XelisPayoutHandler : PayoutHandlerBase,
         var balancesTotal = amounts.Sum(x => x.Value);
         logger.Info(() => $"[{LogCategory}] Paying {FormatAmount(balancesTotal)} to {balances.Length} addresses");
 
+        // hashlak: build_transaction is all-or-nothing per page — one address the daemon rejects would block every
+        // payee of that page forever. Hold the bad ones back (like the Bitcoin handler); a transport error is not a verdict.
         logger.Info(() => $"[{LogCategory}] Validating addresses...");
-        foreach(var pair in amounts)
+        var payable = new List<Balance>();
+
+        foreach(var balance in balances.Where(x => x.Amount > 0))
         {
             var validateAddressRequest = new ValidateAddressRequest
             {
-                Address = pair.Key
+                Address = balance.Address
             };
 
             var validateAddress = await rpcClient.ExecuteAsync<ValidateAddressResponse>(logger, XelisCommands.ValidateAddress, ct, validateAddressRequest);
-            if(validateAddress.Error != null)
-                logger.Warn(()=> $"[{LogCategory}] Address {pair.Key} is not valid: {validateAddress.Error.Message} (Code {validateAddress.Error.Code})");
+
+            if(validateAddress.Error?.Code == PayoutGuardPolicy.TransportErrorCode)
+            {
+                logger.Warn(() => $"[{LogCategory}] Payout round skipped: validate_address unavailable ({validateAddress.Error.Message})");
+                NotifyPayoutNotSent(balances, $"validate_address unavailable: {validateAddress.Error.Message}");
+                return;
+            }
+
+            if(validateAddress.Error != null || validateAddress.Response is { IsValid: false })
+            {
+                logger.Error(() => $"[{LogCategory}] Holding back payout of {FormatAmount(balance.Amount)} to {balance.Address}: address rejected by the daemon ({validateAddress.Error?.Message ?? "is_valid false"})");
+                NotifyPayoutNotSent(new[] { balance }, "address rejected by the daemon");
+                continue;
+            }
+
+            payable.Add(balance);
         }
 
-        var responseBalance = await rpcClientWallet.ExecuteAsync<object>(logger, XelisWalletCommands.GetBalance, ct);
-        if(responseBalance.Error != null)
+        balances = payable.ToArray();
+
+        if(balances.Length == 0)
+            return;
+
+        amounts = balances.ToDictionary(x => x.Address, x => x.Amount);
+        balancesTotal = amounts.Sum(x => x.Value);
+
+        var wallet = await ReadWalletBalanceAsync(ct);
+        if(wallet == null)
         {
-            logger.Warn(()=> $"[{LogCategory}] '{XelisWalletCommands.GetBalance}': {responseBalance.Error.Message} (Code {responseBalance.Error.Code})");
+            NotifyPayoutNotSent(balances, "wallet balance unavailable");
             return;
         }
 
-        var walletBalance = Convert.ToDecimal(responseBalance.Response) / XelisConstants.SmallestUnit;
+        var walletBalance = wallet.Total;
     
         logger.Info(() => $"[{LogCategory}] Current wallet balance - Total: [{FormatAmount(walletBalance)}]");
 
@@ -291,6 +320,7 @@ public class XelisPayoutHandler : PayoutHandlerBase,
         if(walletBalance < balancesTotal)
         {
             logger.Warn(() => $"[{LogCategory}] Wallet balance currently short of {FormatAmount(balancesTotal - walletBalance)}. Will try again");
+            NotifyPayoutNotSent(balances, "wallet balance short");
             return;
         }
 
@@ -334,6 +364,7 @@ public class XelisPayoutHandler : PayoutHandlerBase,
                 if(estimateFeesResponse.Error != null)
                 {
                     logger.Warn(()=> $"[{LogCategory}] '{XelisWalletCommands.EstimateFees}': {estimateFeesResponse.Error.Message} (Code {estimateFeesResponse.Error.Code})");
+                    NotifyPayoutNotSent(page, "estimate_fees failed");
                     continue;
                 }
 
@@ -367,13 +398,15 @@ public class XelisPayoutHandler : PayoutHandlerBase,
             if(buildTransactionResponse.Error != null)
             {
                 logger.Error(()=> $"[{LogCategory}] '{XelisWalletCommands.BuildTransaction}': {buildTransactionResponse.Error.Message} (Code {buildTransactionResponse.Error.Code})");
-                NotifyPayoutFailure(poolConfig.Id, page, $"Daemon command '{XelisWalletCommands.BuildTransaction}' returned error: {buildTransactionResponse.Error.Message} code {buildTransactionResponse.Error.Code}", null);
+                NotifyPayoutFailure(poolConfig.Id, page, $"Daemon command '{XelisWalletCommands.BuildTransaction}' returned error: {buildTransactionResponse.Error.Message} code {buildTransactionResponse.Error.Code}", null, buildTransactionResponse.Error.Code);
                 continue;
             }
 
-            if(string.IsNullOrEmpty(buildTransactionResponse.Response.Hash))
+            if(string.IsNullOrEmpty(buildTransactionResponse.Response?.Hash))
             {
-                logger.Warn(() => $"[{LogCategory}] Payment transaction failed to return a transaction id");
+                // build_transaction broadcasts by default: without a hash the outcome is unknown, never "not sent"
+                logger.Error(() => $"[{LogCategory}] Payment transaction failed to return a transaction id");
+                NotifyPayoutFailure(poolConfig.Id, page, $"Daemon command '{XelisWalletCommands.BuildTransaction}' returned no transaction hash", null);
                 continue;
             }
             else
@@ -394,7 +427,37 @@ public class XelisPayoutHandler : PayoutHandlerBase,
         return effort;
     }
 
+    // hashlak payout guard: the wallet's total balance (xelis_wallet has no locked/unlocked split); null = RPC error
+    public override Task<WalletBalance> GetWalletBalanceAsync(CancellationToken ct)
+    {
+        return ReadWalletBalanceAsync(ct);
+    }
+
+    // build_transaction receives Math.Floor(amount × SmallestUnit): reserve exactly that (no dust between reserved and sent)
+    public override decimal NormalizePayoutAmount(decimal amount)
+    {
+        return Math.Floor(amount * XelisConstants.SmallestUnit) / XelisConstants.SmallestUnit;
+    }
+
+    // xelis_wallet's build_transaction broadcasts by default and its error codes are not documented as pre-broadcast:
+    // no code is ever treated as "not sent" (the base default) — a refused page trips the breaker for a human look
+
     #endregion // IPayoutHandler
+
+    private async Task<WalletBalance> ReadWalletBalanceAsync(CancellationToken ct)
+    {
+        var responseBalance = await rpcClientWallet.ExecuteAsync<object>(logger, XelisWalletCommands.GetBalance, ct);
+
+        if(responseBalance.Error != null || responseBalance.Response == null)
+        {
+            logger.Warn(() => $"[{LogCategory}] '{XelisWalletCommands.GetBalance}': {responseBalance.Error?.Message ?? "no response"} (Code {responseBalance.Error?.Code})");
+            return null;
+        }
+
+        var total = Convert.ToDecimal(responseBalance.Response) / XelisConstants.SmallestUnit;
+
+        return new WalletBalance(total, total);
+    }
 
     private async Task<bool> EnsureDaemonsSynchedAsync(CancellationToken ct)
     {

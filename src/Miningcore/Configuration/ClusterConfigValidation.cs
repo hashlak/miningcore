@@ -186,6 +186,45 @@ public class PoolConfigValidator : AbstractValidator<PoolConfig>
 
         RuleForEach(j => j.Daemons)
             .SetValidator(new AuthenticatedNetworkEndpointConfigValidator<DaemonEndpointConfig>());
+
+        // hashlak payout guard: a present block must be sane; a missing block is not an error here (the pool is tripped at runtime)
+        RuleFor(j => j.PaymentProcessing.Guard)
+            .SetValidator(new PayoutGuardConfigValidator())
+            .When(j => j.PaymentProcessing?.Guard != null);
+
+        RuleFor(j => j.PaymentProcessing)
+            .Must(pp => pp.Guard == null || !pp.Guard.Enabled || pp.Guard.PerPayoutCap >= pp.MinimumPayment)
+            .When(j => j.PaymentProcessing != null)
+            .WithMessage("Pool: paymentProcessing.guard.perPayoutCap must be >= minimumPayment");
+    }
+}
+
+public class PayoutGuardConfigValidator : AbstractValidator<PayoutGuardConfig>
+{
+    public PayoutGuardConfigValidator()
+    {
+        When(j => j.Enabled, () =>
+        {
+            RuleFor(j => j.PerPayoutCap)
+                .GreaterThan(0)
+                .WithMessage("Pool: paymentProcessing.guard.perPayoutCap must be > 0");
+
+            RuleFor(j => j.DailyCap)
+                .GreaterThan(0)
+                .WithMessage("Pool: paymentProcessing.guard.dailyCap must be > 0");
+
+            RuleFor(j => j.DailyCap)
+                .GreaterThanOrEqualTo(j => j.PerPayoutCap)
+                .WithMessage("Pool: paymentProcessing.guard.dailyCap must be >= perPayoutCap");
+
+            RuleFor(j => j.NominalBlockReward)
+                .GreaterThan(0)
+                .WithMessage("Pool: paymentProcessing.guard.nominalBlockReward must be > 0 (what one block credits to miners)");
+
+            RuleFor(j => j.CreditMultiplier)
+                .GreaterThanOrEqualTo(1)
+                .WithMessage("Pool: paymentProcessing.guard.creditMultiplier must be >= 1");
+        });
     }
 }
 
@@ -195,6 +234,12 @@ public class ClusterConfigValidator : AbstractValidator<ClusterConfig>
     {
         RuleFor(j => j.PaymentProcessing)
             .NotNull();
+
+        // hashlak payout guard: switching the guard off on a pool is a cluster-level decision, never a per-pool slip
+        RuleFor(j => j.Pools)
+            .Must((cc, pools) => cc.PaymentProcessing?.AllowUnguardedPools == true ||
+                pools == null || pools.All(p => p.PaymentProcessing?.Guard?.Enabled != false))
+            .WithMessage("Cluster: a pool has paymentProcessing.guard.enabled = false; set paymentProcessing.allowUnguardedPools = true at cluster level to allow it (never on mainnet)");
 
         RuleFor(j => j.Persistence)
             .NotNull()
