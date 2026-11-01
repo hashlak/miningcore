@@ -538,7 +538,36 @@
             "PPBS"
           ]
         },
-        "payoutSchemeConfig": {}
+        "payoutSchemeConfig": {},
+        "guard": {
+          "$ref": "#/definitions/PayoutGuardConfig"
+        }
+      }
+    },
+    "PayoutGuardConfig": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "payoutsEnabled": {
+          "type": "boolean"
+        },
+        "perPayoutCap": {
+          "type": "number"
+        },
+        "dailyCap": {
+          "type": "number"
+        },
+        "nominalBlockReward": {
+          "type": "number"
+        },
+        "creditMultiplier": {
+          "type": "number"
+        }
       }
     },
     "PoolShareBasedBanningConfig": {

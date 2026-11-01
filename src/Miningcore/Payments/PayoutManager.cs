@@ -29,7 +29,8 @@ public class PayoutManager : BackgroundService
         IShareRepository shareRepo,
         IBalanceRepository balanceRepo,
         ClusterConfig clusterConfig,
-        IMessageBus messageBus)
+        IMessageBus messageBus,
+        IPayoutGuard guard)
     {
         Contract.RequiresNonNull(ctx);
         Contract.RequiresNonNull(cf);
@@ -37,6 +38,7 @@ public class PayoutManager : BackgroundService
         Contract.RequiresNonNull(shareRepo);
         Contract.RequiresNonNull(balanceRepo);
         Contract.RequiresNonNull(messageBus);
+        Contract.RequiresNonNull(guard);
 
         this.ctx = ctx;
         this.cf = cf;
@@ -45,6 +47,7 @@ public class PayoutManager : BackgroundService
         this.balanceRepo = balanceRepo;
         this.messageBus = messageBus;
         this.clusterConfig = clusterConfig;
+        this.guard = guard;
 
         interval = TimeSpan.FromSeconds(clusterConfig.PaymentProcessing.Interval > 0 ?
             clusterConfig.PaymentProcessing.Interval : 600);
@@ -57,6 +60,7 @@ public class PayoutManager : BackgroundService
     private readonly IComponentContext ctx;
     private readonly IShareRepository shareRepo;
     private readonly IMessageBus messageBus;
+    private readonly IPayoutGuard guard;
     private readonly TimeSpan interval;
     private readonly ConcurrentDictionary<string, IMiningPool> pools = new();
     private readonly ClusterConfig clusterConfig;
@@ -202,22 +206,57 @@ public class PayoutManager : BackgroundService
         var poolBalancesOverMinimum = await cf.Run(con =>
             balanceRepo.GetPoolBalancesOverThresholdAsync(con, config.Id, config.PaymentProcessing.MinimumPayment));
 
-        if(poolBalancesOverMinimum.Length > 0)
+        if(poolBalancesOverMinimum.Length == 0)
         {
-            try
-            {
-                await handler.PayoutAsync(pool, poolBalancesOverMinimum, ct);
-            }
-
-            catch(Exception ex)
-            {
-                await NotifyPayoutFailureAsync(poolBalancesOverMinimum, config, ex);
-                throw;
-            }
+            logger.Info(() => $"No balances over configured minimum payout for pool {config.Id}");
+            return;
         }
 
-        else
-            logger.Info(() => $"No balances over configured minimum payout for pool {config.Id}");
+        // hashlak payout guard: reserve (debit + run row) before the handler sends, finalize after it returns
+        var decision = await guard.PrepareRunAsync(config, handler, poolBalancesOverMinimum, ct);
+
+        switch(decision)
+        {
+            case PayoutGuardDecision.Legacy:
+                try
+                {
+                    await handler.PayoutAsync(pool, poolBalancesOverMinimum, ct);
+                }
+
+                catch(Exception ex)
+                {
+                    await NotifyPayoutFailureAsync(poolBalancesOverMinimum, config, ex);
+                    throw;
+                }
+
+                break;
+
+            case PayoutGuardDecision.Skip:
+                break;
+
+            case PayoutGuardDecision.Run run:
+                handler.BeginPayoutRun(run.Context);
+                Exception failure = null;
+
+                try
+                {
+                    await handler.PayoutAsync(pool, run.Context.Balances, ct);
+                }
+
+                catch(Exception ex)
+                {
+                    failure = ex;
+                    await NotifyPayoutFailureAsync(run.Context.Balances, config, ex);
+                    throw;
+                }
+
+                finally
+                {
+                    await guard.FinalizeRunAsync(run.Context, failure, ct);
+                }
+
+                break;
+        }
     }
 
     private Task NotifyPayoutFailureAsync(Balance[] balances, PoolConfig pool, Exception ex)
@@ -286,6 +325,9 @@ public class PayoutManager : BackgroundService
                 .Subscribe(OnPoolStatusNotification));
 
             logger.Info(() => "Online");
+
+            // hashlak payout guard: a tripped breaker is reported, an open run trips its pool — before any payment runs
+            await guard.RecoverAtStartupAsync(clusterConfig.Pools.Where(x => x.Enabled && x.PaymentProcessing?.Enabled == true), ct);
 
             // Allow all pools to actually come up before the first payment processing run
             await Task.Delay(initialRunDelay, ct);

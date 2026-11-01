@@ -206,6 +206,7 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
             {
                 // not a verdict about the address: skip this round untouched, the next one (10 min) retries everything
                 logger.Warn(() => $"[{LogCategory}] Payout round skipped: validateaddress unavailable ({check.Error?.Message ?? "no response"})");
+                NotifyPayoutNotSent(balances, $"validateaddress unavailable: {check.Error?.Message ?? "no response"}");
                 return;
             }
 
@@ -214,6 +215,7 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
             else
             {
                 logger.Error(() => $"[{LogCategory}] Holding back payout of {FormatAmount(balance.Amount)} to {balance.Address}: address rejected by the daemon");
+                NotifyPayoutNotSent(new[] { balance }, "address rejected by the daemon");
                 NotifyPayoutFailure(poolConfig.Id, new[] { balance }, "held back: address rejected by the daemon", null);
             }
         }
@@ -332,26 +334,35 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
                         }
 
                         else
+                        {
                             logger.Error(() => $"[{LogCategory}] {BitcoinCommands.WalletPassphrase} returned error: {result.Error.Message} code {result.Error.Code}");
+                            NotifyPayoutNotSent(balances, "wallet locked and walletpassphrase failed");
+                        }
                     }
 
                     else
+                    {
                         logger.Error(() => $"[{LogCategory}] Wallet is locked but walletPassword was not configured. Unable to send funds.");
+                        NotifyPayoutNotSent(balances, "wallet locked and no walletPassword configured");
+                    }
                 }
 
                 else
                 {
                     logger.Error(() => $"[{LogCategory}] {BitcoinCommands.SendMany} returned error: {result.Error.Message} code {result.Error.Code}");
 
-                    NotifyPayoutFailure(poolConfig.Id, balances, $"{BitcoinCommands.SendMany} returned error: {result.Error.Message} code {result.Error.Code}", null);
+                    // the daemon's own error code tells the guard whether the coins left (-500 = transport error, unknown)
+                    NotifyPayoutFailure(poolConfig.Id, balances, $"{BitcoinCommands.SendMany} returned error: {result.Error.Message} code {result.Error.Code}", null, result.Error.Code);
                 }
             }
         }
 
         else
         {
-            var txFailures = new List<Tuple<KeyValuePair<string, decimal>, Exception>>();
-            var successBalances = new Dictionary<Balance, string>();
+            // hashlak: thread-safe collections (the lambdas run 8-wide), the failing address is kept, and the daemon's
+            // error code travels with the failure so the payout guard can tell "rejected" from "unknown"
+            var txFailures = new System.Collections.Concurrent.ConcurrentBag<(KeyValuePair<string, decimal> Pair, Exception Error)>();
+            var successBalances = new System.Collections.Concurrent.ConcurrentDictionary<Balance, string>();
 
             var parallelOptions = new ParallelOptions
             {
@@ -380,14 +391,14 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
                     var txId = result.Response;
 
                     if(result.Error != null)
-                        throw new Exception($"[{transferId}] {BitcoinCommands.SendToAddress} returned error: {result.Error.Message} code {result.Error.Code}");
+                        throw new SendToAddressException(result.Error.Code, $"[{transferId}] {BitcoinCommands.SendToAddress} returned error: {result.Error.Message} code {result.Error.Code}");
 
                     if(string.IsNullOrEmpty(txId))
-                        throw new Exception($"[{transferId}] {BitcoinCommands.SendToAddress} did not return a transaction id!");
+                        throw new SendToAddressException(null, $"[{transferId}] {BitcoinCommands.SendToAddress} did not return a transaction id!");
                     else
                         logger.Info(() => $"[{LogCategory}] [{transferId}] Payment transaction id: {txId}");
 
-                    successBalances.Add(new Balance
+                    successBalances.TryAdd(new Balance
                     {
                         PoolId = poolConfig.Id,
                         Address = address,
@@ -395,25 +406,30 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
                     }, txId);
                 }, ex =>
                 {
-                    txFailures.Add(Tuple.Create(x, ex));
+                    txFailures.Add((x, ex));
                 });
             });
 
             if(successBalances.Any())
             {
-                await PersistPaymentsAsync(successBalances);
+                await PersistPaymentsAsync(new Dictionary<Balance, string>(successBalances));
 
                 NotifyPayoutSuccess(poolConfig.Id, successBalances.Keys.ToArray(), successBalances.Values.ToArray(), null);
             }
 
             if(txFailures.Any())
             {
-                var failureBalances = txFailures.Select(x=> new Balance { Amount = x.Item1.Value }).ToArray();
-                var error = string.Join(", ", txFailures.Select(x => $"{x.Item1.Key} {FormatAmount(x.Item1.Value)}: {x.Item2.Message}"));
+                var error = string.Join(", ", txFailures.Select(x => $"{x.Pair.Key} {FormatAmount(x.Pair.Value)}: {x.Error.Message}"));
 
                 logger.Error(()=> $"[{LogCategory}] Failed to transfer the following balances: {error}");
 
-                NotifyPayoutFailure(poolConfig.Id, failureBalances, error, null);
+                foreach(var (pair, ex) in txFailures)
+                {
+                    var failureBalance = new Balance { PoolId = poolConfig.Id, Address = pair.Key, Amount = pair.Value };
+                    var rpcErrorCode = (ex as SendToAddressException)?.RpcErrorCode;
+
+                    NotifyPayoutFailure(poolConfig.Id, new[] { failureBalance }, ex.Message, null, rpcErrorCode);
+                }
             }
         }
     }
@@ -421,6 +437,40 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
     public double AdjustBlockEffort(double effort)
     {
         return effort;
+    }
+
+    // hashlak payout guard: the daemon receives amounts rounded to payoutDecimalPlaces (the sendmany arguments above);
+    // reserving the floored value means a run never sends more than it debited
+    public override decimal NormalizePayoutAmount(decimal amount)
+    {
+        var factor = (decimal) Math.Pow(10, payoutDecimalPlaces);
+
+        return Math.Floor(amount * factor) / factor;
+    }
+
+    public override async Task<WalletBalance> GetWalletBalanceAsync(CancellationToken ct)
+    {
+        var response = await rpcClient.ExecuteAsync<object>(logger, BitcoinCommands.GetBalance, ct);
+
+        if(response.Error != null || response.Response == null)
+        {
+            logger.Warn(() => $"[{LogCategory}] {BitcoinCommands.GetBalance} unavailable: {response.Error?.Message ?? "no response"}");
+            return null;
+        }
+
+        var total = Convert.ToDecimal(response.Response);
+
+        return new WalletBalance(total, total);
+    }
+
+    private sealed class SendToAddressException : Exception
+    {
+        public SendToAddressException(int? rpcErrorCode, string message) : base(message)
+        {
+            RpcErrorCode = rpcErrorCode;
+        }
+
+        public int? RpcErrorCode { get; }
     }
 
     #endregion // IPayoutHandler

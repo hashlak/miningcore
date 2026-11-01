@@ -135,6 +135,10 @@ public class AutofacModule : Module
         builder.RegisterType<PayoutManager>()
             .SingleInstance();
 
+        builder.RegisterType<PayoutGuard>()
+            .As<IPayoutGuard>()
+            .SingleInstance();
+
         builder.RegisterType<ShareRecorder>()
             .SingleInstance();
 

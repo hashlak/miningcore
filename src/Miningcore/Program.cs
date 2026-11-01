@@ -783,6 +783,7 @@ public class Program : BackgroundService
     private static async Task PreFlightChecks(IServiceProvider services)
     {
         await ConfigurePostgresCompatibilityOptions(services);
+        await EnsurePayoutGuardSchema(services);
 
         ZcashNetworks.Instance.EnsureRegistered();
 
@@ -893,6 +894,26 @@ public class Program : BackgroundService
 
             AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
         }
+    }
+
+    /// <summary>
+    /// hashlak payout guard: a build that carries the guard must not pay against a database without its tables
+    /// (payout_guard.sql, applied by infra/host/payout-guard.sh install). Checked before the host starts.
+    /// </summary>
+    private static async Task EnsurePayoutGuardSchema(IServiceProvider services)
+    {
+        if(clusterConfig.Persistence?.Postgres == null || clusterConfig.PaymentProcessing?.Enabled != true)
+            return;
+
+        var guarded = clusterConfig.Pools?.Any(x => x.Enabled && x.PaymentProcessing?.Enabled == true && x.PaymentProcessing.Guard?.Enabled != false) == true;
+
+        if(!guarded)
+            return;
+
+        var cf = services.GetService<IConnectionFactory>();
+
+        if(await GetPostgresColumnType(cf, "payout_run_items", "sent_amount") == null)
+            throw new PoolStartupException("Payout guard tables are missing or outdated: apply src/Miningcore/Persistence/Postgres/Scripts/payout_guard.sql (infra/host/payout-guard.sh install) before starting");
     }
 
     private static async Task<string> GetPostgresColumnType(IConnectionFactory cf, string table, string column)
