@@ -202,13 +202,19 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
         {
             var check = await rpcClient.ExecuteAsync<ValidateAddressResponse>(logger, BitcoinCommands.ValidateAddress, ct, new[] { balance.Address });
 
-            if(check.Error == null && check.Response is {IsValid: true})
+            if(check.Error != null || check.Response == null)
+            {
+                // not a verdict about the address: skip this round untouched, the next one (10 min) retries everything
+                logger.Warn(() => $"[{LogCategory}] Payout round skipped: validateaddress unavailable ({check.Error?.Message ?? "no response"})");
+                return;
+            }
+
+            if(check.Response.IsValid)
                 payable.Add(balance);
             else
             {
-                var reason = check.Error != null ? $"validateaddress failed: {check.Error.Message}" : "address rejected by the daemon";
-                logger.Error(() => $"[{LogCategory}] Holding back payout of {FormatAmount(balance.Amount)} to {balance.Address}: {reason}");
-                NotifyPayoutFailure(poolConfig.Id, new[] { balance }, $"held back: {reason}", null);
+                logger.Error(() => $"[{LogCategory}] Holding back payout of {FormatAmount(balance.Amount)} to {balance.Address}: address rejected by the daemon");
+                NotifyPayoutFailure(poolConfig.Id, new[] { balance }, "held back: address rejected by the daemon", null);
             }
         }
 

@@ -1,8 +1,8 @@
 using System;
-using Miningcore.Blockchain.Bitcoin;
+using Miningcore.Blockchain;
 using Xunit;
 
-namespace Miningcore.Tests.Blockchain.Bitcoin;
+namespace Miningcore.Tests.Blockchain;
 
 public class ValidatedAddressCacheTests
 {
@@ -31,16 +31,14 @@ public class ValidatedAddressCacheTests
     }
 
     [Fact]
-    public void Is_Bounded_And_Fails_Closed()
+    public void Is_Bounded()
     {
         using var cache = new ValidatedAddressCache(capacity: 2);
 
         cache.Remember("a");
         cache.Remember("b");
-        cache.Remember("c");   // over capacity: not stored, the caller falls back to the daemon
+        cache.Remember("c");   // over capacity: refused (a background compaction may evict older entries later)
 
-        Assert.True(cache.Contains("a"));
-        Assert.True(cache.Contains("b"));
         Assert.False(cache.Contains("c"));
         Assert.True(cache.Count <= 2);
     }

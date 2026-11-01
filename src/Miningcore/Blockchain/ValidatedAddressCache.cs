@@ -1,12 +1,13 @@
 using Microsoft.Extensions.Caching.Memory;
 
-namespace Miningcore.Blockchain.Bitcoin;
+namespace Miningcore.Blockchain;
 
 /// <summary>
 /// Addresses the daemon of ONE pool accepted, remembered so a reconnect storm (a farm after a power cut, a pool
 /// restart) does not become hundreds of validateaddress RPCs per second. One instance per job manager, i.e. per
-/// pool and per daemon: a testnet daemon's verdict never leaks into a mainnet pool. Bounded: when full, nothing is
-/// added and every login goes back to the daemon (fail closed). Invalid addresses are never stored.
+/// pool and per daemon: a testnet daemon's verdict never leaks into a mainnet pool. Bounded: at the size limit an
+/// insert is refused until a background compaction frees ~5 % of the least recently used entries, and a miss simply
+/// goes back to the daemon. Invalid addresses are never stored.
 /// </summary>
 public sealed class ValidatedAddressCache : IDisposable
 {

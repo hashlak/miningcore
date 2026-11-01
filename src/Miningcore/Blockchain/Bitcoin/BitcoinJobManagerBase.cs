@@ -613,8 +613,11 @@ public abstract class BitcoinJobManagerBase<TJob> : JobManagerBase<TJob>
         base.Configure(pc, cc);
     }
 
-    // hashlak: one bounded cache per pool (never static: every KawPow coin shares this base class in one process)
+    // hashlak: one bounded cache per pool (never static: every KawPow coin shares this base class in one process),
+    // and at most 16 validateaddress calls in flight so a login burst cannot fill the daemon's RPC queue that
+    // getblocktemplate / submitblock need
     protected readonly ValidatedAddressCache validatedAddresses = new();
+    private readonly SemaphoreSlim validateAddressSlots = new(16, 16);
 
     public virtual async Task<bool> ValidateAddressAsync(string address, CancellationToken ct)
     {
@@ -627,22 +630,34 @@ public abstract class BitcoinJobManagerBase<TJob> : JobManagerBase<TJob>
     /// </summary>
     public virtual async Task<AddressValidation> ValidateAddressDetailedAsync(string address, CancellationToken ct)
     {
-        if(string.IsNullOrEmpty(address))
+        // base58 and bech32 addresses are plain ASCII letters and digits: junk never reaches the daemon or the logs
+        if(string.IsNullOrEmpty(address) || address.Length < 20 || address.Length > 100 || !address.All(char.IsAsciiLetterOrDigit))
             return AddressValidation.Invalid;
 
         if(validatedAddresses.Contains(address))
             return AddressValidation.Valid;
 
-        var result = await rpc.ExecuteAsync<ValidateAddressResponse>(logger, BitcoinCommands.ValidateAddress, ct, new[] { address });
-
-        if(result.Error != null || result.Response == null)
+        if(!await validateAddressSlots.WaitAsync(TimeSpan.FromSeconds(2), ct))
             return AddressValidation.DaemonError;
 
-        if(!result.Response.IsValid)
-            return AddressValidation.Invalid;
+        try
+        {
+            var result = await rpc.ExecuteAsync<ValidateAddressResponse>(logger, BitcoinCommands.ValidateAddress, ct, new[] { address });
 
-        validatedAddresses.Remember(address);
-        return AddressValidation.Valid;
+            if(result.Error != null || result.Response == null)
+                return AddressValidation.DaemonError;
+
+            if(!result.Response.IsValid)
+                return AddressValidation.Invalid;
+
+            validatedAddresses.Remember(address);
+            return AddressValidation.Valid;
+        }
+
+        finally
+        {
+            validateAddressSlots.Release();
+        }
     }
 
     #endregion // API-Surface
