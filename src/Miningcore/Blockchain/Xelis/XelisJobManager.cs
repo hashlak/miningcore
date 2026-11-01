@@ -363,24 +363,48 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         return response.Response.Address;
     }
 
+    // hashlak: same scheme as the Bitcoin family — per-pool bounded cache, RPC concurrency cap, three-way outcome
+    private readonly ValidatedAddressCache validatedAddresses = new();
+    private readonly SemaphoreSlim validateAddressSlots = new(16, 16);
+
     public async Task<bool> ValidateAddressAsync(string address, CancellationToken ct)
     {
-        if(string.IsNullOrEmpty(address))
-            return false;
+        return await ValidateAddressDetailedAsync(address, ct) == AddressValidation.Valid;
+    }
 
-        var validateAddressRequest = new ValidateAddressRequest
-        {
-            Address = address
-        };
+    public async Task<AddressValidation> ValidateAddressDetailedAsync(string address, CancellationToken ct)
+    {
+        // xel:/xet: + bech32: letters, digits and one colon
+        if(string.IsNullOrEmpty(address) || address.Length < 20 || address.Length > 128 || !address.All(c => char.IsAsciiLetterOrDigit(c) || c == ':'))
+            return AddressValidation.Invalid;
 
-        var response = await rpc.ExecuteAsync<ValidateAddressResponse>(logger, XelisCommands.ValidateAddress, ct, validateAddressRequest);
-        if(response.Error != null)
+        if(validatedAddresses.Contains(address))
+            return AddressValidation.Valid;
+
+        if(!await validateAddressSlots.WaitAsync(TimeSpan.FromSeconds(2), ct))
+            return AddressValidation.DaemonError;
+
+        try
         {
-            logger.Warn(() => $"'{address}': {response.Error.Message} (Code {response.Error.Code})");
-            return false;
+            var response = await rpc.ExecuteAsync<ValidateAddressResponse>(logger, XelisCommands.ValidateAddress, ct, new ValidateAddressRequest { Address = address });
+
+            if(response.Error != null || response.Response == null)
+            {
+                logger.Warn(() => $"validate_address did not answer: {response.Error?.Message ?? "no response"} (Code {response.Error?.Code})");
+                return AddressValidation.DaemonError;
+            }
+
+            if(!response.Response.IsValid)
+                return AddressValidation.Invalid;
+
+            validatedAddresses.Remember(address);
+            return AddressValidation.Valid;
         }
 
-        return response.Response.IsValid;
+        finally
+        {
+            validateAddressSlots.Release();
+        }
     }
 
     public double ShareMultiplier => coin.ShareMultiplier;

@@ -128,8 +128,30 @@ public class XelisPool : PoolBase
 
         // assumes that minerName is an address
         minerName = await manager.NormalizeAddressAsync(minerName, ct);
-        context.IsAuthorized = await manager.ValidateAddressAsync(minerName, ct);
 
+        // hashlak: one address per connection — the same address again is simply confirmed, another address is refused
+        if(context.IsAuthorized && !string.IsNullOrEmpty(context.Miner))
+        {
+            if(string.Equals(context.Miner, minerName, StringComparison.Ordinal))
+                await connection.RespondAsync(new JsonRpcResponse<object>(true, request.Id));
+            else
+                await connection.RespondErrorAsync(StratumError.UnauthorizedWorker, "already authorized with a different address on this connection", request.Id, false);
+
+            return;
+        }
+
+        // a daemon that does not answer is not a verdict: no ban, socket closed so the retry passes the per-IP limit
+        var validation = await manager.ValidateAddressDetailedAsync(minerName, ct);
+
+        if(validation == AddressValidation.DaemonError)
+        {
+            logger.Warn(() => $"[{connection.ConnectionId}] Address check unavailable (daemon did not answer) for {(minerName?.Length > 64 ? minerName[..64] + "\u2026" : minerName)}: retry, no ban");
+            await connection.RespondErrorAsync(StratumError.Other, "address check temporarily unavailable, retry", request.Id, false);
+            Disconnect(connection);
+            return;
+        }
+
+        context.IsAuthorized = validation == AddressValidation.Valid;
         context.Miner = minerName;
         context.Worker = workerName;
 
