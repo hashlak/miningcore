@@ -86,6 +86,16 @@ public abstract class PayoutHandlerBase
     }
 
     /// <summary>
+    /// hashlak payout guard: JSON-RPC error codes this handler's wallet raises BEFORE anything is signed or relayed
+    /// (bad address, insufficient funds, locked wallet …). Only those let the guard re-credit a payee; every other
+    /// error from a send is treated as "coins may have left". Default: none.
+    /// </summary>
+    protected virtual bool IsNotSentErrorCode(int rpcErrorCode)
+    {
+        return false;
+    }
+
+    /// <summary>
     /// hashlak payout guard: these payees are certainly NOT paid in this run (pre-check failed, page skipped, wallet locked …);
     /// the guard re-credits them when the run is finalized. Use NotifyPayoutFailure when the node was actually asked to send.
     /// </summary>
@@ -281,8 +291,9 @@ public abstract class PayoutHandlerBase
 
         if(payoutRun != null && balances != null)
         {
-            if(PayoutGuardPolicy.Classify(rpcErrorCode, ex) == PayoutFailureKind.Rejected)
-                payoutRun.Reject(balances, error ?? ex?.Message);
+            // a wallet rejection of a send is re-credited AND trips the breaker (a human looks before the next send)
+            if(PayoutGuardPolicy.Classify(rpcErrorCode, ex, IsNotSentErrorCode) == PayoutFailureKind.Rejected)
+                payoutRun.RejectBySend(balances, error ?? ex?.Message);
             else
                 payoutRun.Unresolved(balances, error ?? ex?.Message);
         }

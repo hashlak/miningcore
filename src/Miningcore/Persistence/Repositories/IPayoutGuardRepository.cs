@@ -32,14 +32,26 @@ public interface IPayoutGuardRepository
 
     Task<PayoutRun[]> GetOpenRunsAsync(IDbConnection con, string poolId);
 
+    /// <summary>Same inside a transaction (the guard repeats the check under the state-row lock).</summary>
+    Task<PayoutRun[]> GetOpenRunsAsync(IDbConnection con, IDbTransaction tx, string poolId);
+
+    /// <summary>
+    /// A run still `reserved` when no run is in flight (startup, or a later tick) can only be the leftover of a crash:
+    /// the run and its reserved items become `unresolved` so the operator script may act on them.
+    /// </summary>
+    Task MarkRunUnresolvedAsync(IDbConnection con, IDbTransaction tx, Guid runId, string reason);
+
     Task InsertRunAsync(IDbConnection con, IDbTransaction tx, PayoutRun run, PayoutRunItem[] items);
 
     /// <summary>Marks reserved items as paid. Returns the number of rows changed (the caller verifies it equals the request).</summary>
     Task<int> MarkItemsPaidAsync(IDbConnection con, IDbTransaction tx, Guid runId, IReadOnlyList<(string Address, string TxId, decimal SentAmount)> paid);
 
-    Task MarkItemAsync(IDbConnection con, IDbTransaction tx, Guid runId, string address, string status, string error);
+    /// <summary>Moves one item from `reserved` to the given status. Returns 0 when the item was no longer reserved.</summary>
+    Task<int> MarkReservedItemAsync(IDbConnection con, IDbTransaction tx, Guid runId, string address, string status, string error);
 
-    Task<PayoutRunItem[]> GetItemsAsync(IDbConnection con, IDbTransaction tx, Guid runId);
+    /// <summary>The run's items, locked FOR UPDATE for the rest of the transaction (finalize vs. the operator script).</summary>
+    Task<PayoutRunItem[]> GetItemsForUpdateAsync(IDbConnection con, IDbTransaction tx, Guid runId);
 
-    Task UpdateRunStatusAsync(IDbConnection con, IDbTransaction tx, Guid runId, string status, string error);
+    /// <summary>Moves the run from `reserved` to the given status. Returns 0 when the run was no longer reserved.</summary>
+    Task<int> UpdateReservedRunStatusAsync(IDbConnection con, IDbTransaction tx, Guid runId, string status, string error);
 }

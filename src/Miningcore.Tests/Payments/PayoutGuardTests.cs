@@ -37,11 +37,14 @@ public class PayoutGuardTests
 
         repo.GetStateAsync(con, "p").Returns(Task.FromResult<PayoutGuardState>(null));
         repo.GetOpenRunsAsync(con, "p").Returns(Task.FromResult(Array.Empty<PayoutRun>()));
+        repo.GetOpenRunsAsync(con, tx, "p").Returns(Task.FromResult(Array.Empty<PayoutRun>()));
         repo.GetStateForUpdateAsync(con, tx, "p").Returns(Task.FromResult(new PayoutGuardState { PoolId = "p" }));
         repo.GetPaidLast24hAsync(con, tx, "p").Returns(Task.FromResult(0m));
         repo.GetCreditedLast24hAsync(con, tx, "p").Returns(Task.FromResult(0m));
         repo.GetCreditedBlocksLast24hAsync(con, tx, "p").Returns(Task.FromResult(0));
         repo.GetBalanceForUpdateAsync(con, tx, "p", Arg.Any<string>()).Returns(x => Task.FromResult<decimal?>(candidates.First(b => b.Address == x.ArgAt<string>(3)).Amount));
+        repo.MarkReservedItemAsync(con, tx, Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>()).Returns(Task.FromResult(1));
+        repo.UpdateReservedRunStatusAsync(con, tx, Arg.Any<Guid>(), Arg.Any<string>(), Arg.Any<string>()).Returns(Task.FromResult(1));
 
         guard = new PayoutGuard(cf, repo, balanceRepo, bus);
     }
@@ -60,7 +63,7 @@ public class PayoutGuardTests
     private static PayoutGuardConfig Config() => new() { PerPayoutCap = 10, DailyCap = 100, NominalBlockReward = 50 };
 
     [Fact]
-    public async Task Missing_Config_Trips_And_Skips()
+    public async Task Missing_Config_Trips_Once_And_Skips()
     {
         var decision = await guard.PrepareRunAsync(Pool(null), handler, candidates, CancellationToken.None);
 
@@ -68,6 +71,12 @@ public class PayoutGuardTests
         await repo.Received(1).TripAsync(con, tx, "p", Arg.Is<string>(s => s.Contains("guard config missing")));
         bus.Received(1).SendMessage(Arg.Any<AdminNotification>());
         await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
+
+        // already tripped: no second trip, no second notification
+        repo.GetStateAsync(con, "p").Returns(Task.FromResult(new PayoutGuardState { PoolId = "p", Tripped = true, TrippedReason = "guard config missing" }));
+        Assert.IsType<PayoutGuardDecision.Skip>(await guard.PrepareRunAsync(Pool(null), handler, candidates, CancellationToken.None));
+        await repo.Received(1).TripAsync(con, tx, "p", Arg.Any<string>());
+        bus.Received(1).SendMessage(Arg.Any<AdminNotification>());
     }
 
     [Fact]
@@ -93,14 +102,17 @@ public class PayoutGuardTests
     }
 
     [Fact]
-    public async Task Open_Run_Trips()
+    public async Task Open_Run_Becomes_Unresolved_And_Trips()
     {
-        repo.GetOpenRunsAsync(con, "p").Returns(Task.FromResult(new[] { new PayoutRun { RunId = Guid.NewGuid(), PoolId = "p", Status = PayoutRunStatus.Unresolved } }));
+        var stale = new PayoutRun { RunId = Guid.NewGuid(), PoolId = "p", Status = PayoutRunStatus.Reserved };
+        repo.GetOpenRunsAsync(con, tx, "p").Returns(Task.FromResult(new[] { stale }));
 
         var decision = await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None);
 
         Assert.IsType<PayoutGuardDecision.Skip>(decision);
+        await repo.Received(1).MarkRunUnresolvedAsync(con, tx, stale.RunId, Arg.Any<string>());
         await repo.Received(1).TripAsync(con, tx, "p", Arg.Is<string>(s => s.Contains("open run")));
+        await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
     }
 
     [Fact]
@@ -146,7 +158,7 @@ public class PayoutGuardTests
 
         var reserved = Assert.IsType<PayoutGuardDecision.Run>(decision);
         Assert.Equal(17m, reserved.Context.Total);
-        Assert.Equal(new[] { 5m, 10m, 2m }, reserved.Context.Balances.Select(x => x.Amount));
+        Assert.Equal(new[] { 10m, 5m, 2m }, reserved.Context.Balances.Select(x => x.Amount));   // largest first (daily-cap order)
 
         Assert.Equal(PayoutRunStatus.Reserved, run.Status);
         Assert.Equal("TST", run.Coin);
@@ -159,7 +171,7 @@ public class PayoutGuardTests
         await balanceRepo.Received(1).AddAmountAsync(con, tx, "p", "b", -10m, "Payout reserved", $"payout:{run.RunId}");
         await balanceRepo.Received(3).AddAmountAsync(con, tx, "p", Arg.Any<string>(), Arg.Is<decimal>(d => d < 0), "Payout reserved", Arg.Any<string[]>());
         await repo.Received(1).UpdateRunStatsAsync(con, tx, "p", 17m, 0m, 1000m);
-        tx.Received(1).Commit();
+        tx.Received(2).Commit();   // the open-run check under its own lock, then the reservation
         tx.DidNotReceive().Rollback();
         await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
     }
@@ -183,18 +195,27 @@ public class PayoutGuardTests
     }
 
     [Fact]
-    public async Task Daily_Cap_Trips_Inside_The_Transaction_And_Reserves_Nothing()
+    public async Task Daily_Cap_Defers_Instead_Of_Tripping()
     {
-        repo.GetPaidLast24hAsync(con, tx, "p").Returns(Task.FromResult(90m));
+        PayoutRunItem[] items = null;
+        repo.InsertRunAsync(con, tx, Arg.Any<PayoutRun>(), Arg.Do<PayoutRunItem[]>(i => items = i)).Returns(Task.CompletedTask);
+        repo.GetPaidLast24hAsync(con, tx, "p").Returns(Task.FromResult(90m));   // room 10: only b (10) fits
 
         var decision = await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None);
 
-        Assert.IsType<PayoutGuardDecision.Skip>(decision);
-        await repo.Received(1).TripAsync(con, tx, "p", Arg.Is<string>(s => s.Contains("daily cap")));
+        var reserved = Assert.IsType<PayoutGuardDecision.Run>(decision);
+        Assert.Single(items);
+        Assert.Equal("b", items[0].Address);
+        Assert.Equal(10m, reserved.Context.Total);
+        await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
+        await repo.Received(1).UpdateRunStatsAsync(con, tx, "p", 100m, 0m, 1000m);
+
+        repo.ClearReceivedCalls();
+        repo.GetPaidLast24hAsync(con, tx, "p").Returns(Task.FromResult(100m));   // no room at all
+        Assert.IsType<PayoutGuardDecision.Skip>(await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None));
         await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
-        await balanceRepo.DidNotReceiveWithAnyArgs().AddAmountAsync(default, default, default, default, default, default);
-        tx.Received(1).Commit();
-        bus.Received(1).SendMessage(Arg.Any<AdminNotification>());
+        await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
+        tx.Received().Commit();
     }
 
     [Fact]
@@ -208,6 +229,7 @@ public class PayoutGuardTests
         Assert.IsType<PayoutGuardDecision.Skip>(decision);
         await repo.Received(1).TripAsync(con, tx, "p", Arg.Is<string>(s => s.Contains("credit anomaly")));
         await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
+        bus.Received(1).SendMessage(Arg.Any<AdminNotification>());
     }
 
     [Fact]
@@ -218,8 +240,8 @@ public class PayoutGuardTests
         var decision = await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None);
 
         Assert.IsType<PayoutGuardDecision.Skip>(decision);
-        tx.Received(1).Rollback();
-        tx.DidNotReceive().Commit();
+        tx.Received(1).Rollback();   // the reservation transaction
+        tx.Received(1).Commit();     // only the open-run check before it
         await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
         await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
     }
@@ -228,21 +250,21 @@ public class PayoutGuardTests
     public async Task Finalize_All_Confirmed_Is_Paid()
     {
         var ctx = new PayoutRunContext(Guid.NewGuid(), "p", new[] { B("a", 5) }, repo);
-        repo.GetItemsAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[] { Item(ctx.RunId, "a", 5, PayoutRunStatus.Paid) }));
+        repo.GetItemsForUpdateAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[] { Item(ctx.RunId, "a", 5, PayoutRunStatus.Paid) }));
 
         await guard.FinalizeRunAsync(ctx, null, CancellationToken.None);
 
-        await repo.Received(1).UpdateRunStatusAsync(con, tx, ctx.RunId, PayoutRunStatus.Paid, null);
+        await repo.Received(1).UpdateReservedRunStatusAsync(con, tx, ctx.RunId, PayoutRunStatus.Paid, null);
         await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
         await balanceRepo.DidNotReceiveWithAnyArgs().AddAmountAsync(default, default, default, default, default, default);
     }
 
     [Fact]
-    public async Task Finalize_Rejected_Items_Are_Recredited_Without_A_Trip()
+    public async Task Finalize_Precheck_Rejections_Are_Recredited_Without_A_Trip()
     {
         var ctx = new PayoutRunContext(Guid.NewGuid(), "p", new[] { B("a", 5), B("b", 7) }, repo);
         ctx.Reject(new[] { B("b", 7) }, "address rejected by the daemon");
-        repo.GetItemsAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[]
+        repo.GetItemsForUpdateAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[]
         {
             Item(ctx.RunId, "a", 5, PayoutRunStatus.Paid),
             Item(ctx.RunId, "b", 7, PayoutRunStatus.Reserved)
@@ -250,46 +272,81 @@ public class PayoutGuardTests
 
         await guard.FinalizeRunAsync(ctx, null, CancellationToken.None);
 
-        await repo.Received(1).MarkItemAsync(con, tx, ctx.RunId, "b", PayoutRunStatus.Failed, "address rejected by the daemon");
+        await repo.Received(1).MarkReservedItemAsync(con, tx, ctx.RunId, "b", PayoutRunStatus.Failed, "address rejected by the daemon");
         await balanceRepo.Received(1).AddAmountAsync(con, tx, "p", "b", 7m, Arg.Is<string>(s => s.StartsWith("Payout failed")), $"payout:{ctx.RunId}", "payout-recredit");
-        await repo.Received(1).UpdateRunStatusAsync(con, tx, ctx.RunId, PayoutRunStatus.Paid, null);
+        await repo.Received(1).UpdateReservedRunStatusAsync(con, tx, ctx.RunId, PayoutRunStatus.Paid, null);
         await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Finalize_Send_Rejection_Is_Recredited_And_Trips()
+    {
+        var ctx = new PayoutRunContext(Guid.NewGuid(), "p", new[] { B("a", 5) }, repo);
+        ctx.RejectBySend(new[] { B("a", 5) }, "sendmany returned error: Insufficient funds code -6");
+        repo.GetItemsForUpdateAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[] { Item(ctx.RunId, "a", 5, PayoutRunStatus.Reserved) }));
+
+        await guard.FinalizeRunAsync(ctx, null, CancellationToken.None);
+
+        await balanceRepo.Received(1).AddAmountAsync(con, tx, "p", "a", 5m, Arg.Any<string>(), $"payout:{ctx.RunId}", "payout-recredit");
+        await repo.Received(1).UpdateReservedRunStatusAsync(con, tx, ctx.RunId, PayoutRunStatus.Failed, Arg.Is<string>(s => s.Contains("refused a send")));
+        await repo.Received(1).TripAsync(con, tx, "p", Arg.Is<string>(s => s.Contains("refused a send")));
+        bus.Received(1).SendMessage(Arg.Any<AdminNotification>());
     }
 
     [Fact]
     public async Task Finalize_Unconfirmed_Item_Is_Unresolved_And_Trips()
     {
         var ctx = new PayoutRunContext(Guid.NewGuid(), "p", new[] { B("a", 5) }, repo);
-        repo.GetItemsAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[] { Item(ctx.RunId, "a", 5, PayoutRunStatus.Reserved) }));
+        repo.GetItemsForUpdateAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[] { Item(ctx.RunId, "a", 5, PayoutRunStatus.Reserved) }));
 
         await guard.FinalizeRunAsync(ctx, new TimeoutException("sendmany timed out"), CancellationToken.None);
 
-        await repo.Received(1).MarkItemAsync(con, tx, ctx.RunId, "a", PayoutRunStatus.Unresolved, "sendmany timed out");
-        await repo.Received(1).UpdateRunStatusAsync(con, tx, ctx.RunId, PayoutRunStatus.Unresolved, Arg.Is<string>(s => s.Contains("unresolved")));
+        await repo.Received(1).MarkReservedItemAsync(con, tx, ctx.RunId, "a", PayoutRunStatus.Unresolved, "sendmany timed out");
+        await repo.Received(1).UpdateReservedRunStatusAsync(con, tx, ctx.RunId, PayoutRunStatus.Unresolved, Arg.Is<string>(s => s.Contains("unresolved")));
         await repo.Received(1).TripAsync(con, tx, "p", Arg.Is<string>(s => s.Contains(ctx.RunId.ToString())));
         await balanceRepo.DidNotReceiveWithAnyArgs().AddAmountAsync(default, default, default, default, default, default);
         bus.Received(1).SendMessage(Arg.Any<AdminNotification>());
     }
 
     [Fact]
-    public async Task Finalize_Runs_Once()
+    public async Task Finalize_Never_Recredits_An_Item_Settled_Underneath_It()
     {
-        var ctx = new PayoutRunContext(Guid.NewGuid(), "p", new[] { B("a", 5) }, repo);
-        repo.GetItemsAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[] { Item(ctx.RunId, "a", 5, PayoutRunStatus.Paid) }));
+        var ctx = new PayoutRunContext(Guid.NewGuid(), "p", new[] { B("a", 5), B("b", 7) }, repo);
+        ctx.Reject(new[] { B("a", 5), B("b", 7) }, "not sent");
+        repo.GetItemsForUpdateAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[]
+        {
+            Item(ctx.RunId, "a", 5, PayoutRunStatus.Failed),      // the operator already resolved it
+            Item(ctx.RunId, "b", 7, PayoutRunStatus.Reserved)
+        }));
+        repo.MarkReservedItemAsync(con, tx, ctx.RunId, "b", PayoutRunStatus.Failed, Arg.Any<string>()).Returns(Task.FromResult(0));   // changed in between
 
         await guard.FinalizeRunAsync(ctx, null, CancellationToken.None);
-        await guard.FinalizeRunAsync(ctx, null, CancellationToken.None);
 
-        await repo.Received(1).GetItemsAsync(con, tx, ctx.RunId);
+        await balanceRepo.DidNotReceiveWithAnyArgs().AddAmountAsync(default, default, default, default, default, default);
+        await repo.Received(1).TripAsync(con, tx, "p", Arg.Is<string>(s => s.Contains("although the run was still sending") || s.Contains("changed underneath")));
     }
 
     [Fact]
-    public async Task Startup_Recovery_Trips_Pools_With_Open_Runs()
+    public async Task Finalize_Runs_Once()
     {
-        repo.GetOpenRunsAsync(con, "p").Returns(Task.FromResult(new[] { new PayoutRun { RunId = Guid.NewGuid(), PoolId = "p", Status = PayoutRunStatus.Reserved } }));
+        var ctx = new PayoutRunContext(Guid.NewGuid(), "p", new[] { B("a", 5) }, repo);
+        repo.GetItemsForUpdateAsync(con, tx, ctx.RunId).Returns(Task.FromResult(new[] { Item(ctx.RunId, "a", 5, PayoutRunStatus.Paid) }));
+
+        await guard.FinalizeRunAsync(ctx, null, CancellationToken.None);
+        await guard.FinalizeRunAsync(ctx, null, CancellationToken.None);
+
+        await repo.Received(1).GetItemsForUpdateAsync(con, tx, ctx.RunId);
+    }
+
+    [Fact]
+    public async Task Startup_Recovery_Marks_Stale_Runs_Unresolved_And_Trips()
+    {
+        var stale = new PayoutRun { RunId = Guid.NewGuid(), PoolId = "p", Status = PayoutRunStatus.Reserved };
+        repo.GetOpenRunsAsync(con, tx, "p").Returns(Task.FromResult(new[] { stale }));
 
         await guard.RecoverAtStartupAsync(new[] { Pool(Config()) }, CancellationToken.None);
 
+        await repo.Received(1).MarkRunUnresolvedAsync(con, tx, stale.RunId, Arg.Is<string>(s => s.Contains("startup")));
         await repo.Received(1).TripAsync(con, tx, "p", Arg.Is<string>(s => s.Contains("startup")));
     }
 

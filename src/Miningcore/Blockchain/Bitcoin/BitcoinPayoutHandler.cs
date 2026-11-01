@@ -448,6 +448,15 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
         return Math.Floor(amount * factor) / factor;
     }
 
+    // bitcoind-family RPC errors raised while building the transaction, before signing or relaying (rpc/protocol.h):
+    // RPC_TYPE_ERROR -3, RPC_INVALID_ADDRESS_OR_KEY -5, RPC_WALLET_INSUFFICIENT_FUNDS -6, RPC_INVALID_PARAMETER -8,
+    // RPC_WALLET_UNLOCK_NEEDED -13, RPC_WALLET_PASSPHRASE_INCORRECT -14, RPC_INVALID_PARAMS -32602, RPC_INVALID_REQUEST -32600.
+    // Everything else (-4 "transaction commit failed", -25, -26, -500 …) may have left the wallet.
+    protected override bool IsNotSentErrorCode(int rpcErrorCode)
+    {
+        return rpcErrorCode is -3 or -5 or -6 or -8 or -13 or -14 or -32602 or -32600;
+    }
+
     public override async Task<WalletBalance> GetWalletBalanceAsync(CancellationToken ct)
     {
         var response = await rpcClient.ExecuteAsync<object>(logger, BitcoinCommands.GetBalance, ct);

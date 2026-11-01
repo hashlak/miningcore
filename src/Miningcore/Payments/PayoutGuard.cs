@@ -21,9 +21,11 @@ namespace Miningcore.Payments;
 //   reserve  — payout_runs + payout_run_items are inserted and every balance is debited in ONE transaction
 //              (balance_changes tagged "payout:<run_id>"), after the caps, the breaker and the hot-wallet balance passed;
 //   pay      — the handler sends; PersistPaymentsAsync confirms items (status paid + txid) instead of debiting again;
-//   finalize — items the handler reported as rejected by the node are re-credited; anything else that is not
-//              confirmed is marked unresolved and TRIPS the breaker: coins may or may not have left, a human decides
-//              (infra/host/payout-guard.sh resolve). Nothing unresolved is ever re-credited automatically.
+//   finalize — payees that certainly were not sent (pre-checks, or a wallet error known to come before signing) are
+//              re-credited; anything else that is not confirmed is marked unresolved and TRIPS the breaker: coins may
+//              or may not have left, a human decides (infra/host/payout-guard.sh resolve). A wallet rejection of a send
+//              trips as well, after the re-credit, so a human looks before the next send. Nothing unresolved is ever
+//              re-credited automatically.
 //
 // The breaker is a row in payout_guard_state; a restart never resets it.
 
@@ -32,10 +34,10 @@ public record WalletBalance(decimal Total, decimal? Unlocked);
 
 public enum PayoutFailureKind
 {
-    /// <summary>The node answered with an explicit error: the coins did not leave.</summary>
+    /// <summary>The wallet answered with an error it only raises before signing: the coins did not leave.</summary>
     Rejected,
 
-    /// <summary>Transport error, timeout, exception or missing transaction id: the coins may have left.</summary>
+    /// <summary>Transport error, timeout, exception, unknown error code or missing transaction id: the coins may have left.</summary>
     Unresolved
 }
 
@@ -64,11 +66,31 @@ public static class PayoutGuardPolicy
             .ToArray();
     }
 
-    public static string DailyCapReasonOrNull(decimal paid24h, decimal batch, decimal dailyCap)
+    /// <summary>
+    /// The daily cap is a rate limit, not a fault: items that fit into the remaining room (largest first) are paid now,
+    /// the rest waits for the next window. Returns the items to pay and the deferred ones.
+    /// </summary>
+    public static (Balance[] Pay, Balance[] Deferred) ApplyDailyCap(IEnumerable<Balance> items, decimal paid24h, decimal dailyCap)
     {
-        return paid24h + batch > dailyCap ?
-            $"daily cap: {paid24h} paid in the last 24 h + batch {batch} > {dailyCap}" :
-            null;
+        Contract.RequiresNonNull(items);
+
+        var room = dailyCap - paid24h;
+        var pay = new List<Balance>();
+        var deferred = new List<Balance>();
+        var sum = 0m;
+
+        foreach(var item in items.OrderByDescending(x => x.Amount).ThenBy(x => x.Address, StringComparer.Ordinal))
+        {
+            if(room > 0 && sum + item.Amount <= room)
+            {
+                pay.Add(item);
+                sum += item.Amount;
+            }
+            else
+                deferred.Add(item);
+        }
+
+        return (pay.ToArray(), deferred.ToArray());
     }
 
     /// <summary>
@@ -101,9 +123,15 @@ public static class PayoutGuardPolicy
         return wallet.Unlocked.HasValue && wallet.Unlocked.Value < batch;
     }
 
-    public static PayoutFailureKind Classify(int? rpcErrorCode, Exception ex)
+    /// <summary>
+    /// Only an explicit error code the handler lists as "raised before anything is signed" means the coins stayed.
+    /// A transport error (-500), an exception, no code at all, or any other code is unknown territory.
+    /// </summary>
+    public static PayoutFailureKind Classify(int? rpcErrorCode, Exception ex, Func<int, bool> isNotSentCode)
     {
-        if(ex == null && rpcErrorCode.HasValue && rpcErrorCode.Value != TransportErrorCode)
+        Contract.RequiresNonNull(isNotSentCode);
+
+        if(ex == null && rpcErrorCode.HasValue && rpcErrorCode.Value != TransportErrorCode && isNotSentCode(rpcErrorCode.Value))
             return PayoutFailureKind.Rejected;
 
         return PayoutFailureKind.Unresolved;
@@ -141,6 +169,7 @@ public sealed class PayoutRunContext
     private readonly IPayoutGuardRepository repo;
     private readonly ConcurrentDictionary<string, (PayoutItemState State, string Detail)> items = new(StringComparer.Ordinal);
     private int finalized;
+    private int sendRejections;
 
     public Guid RunId { get; }
     public string PoolId { get; }
@@ -149,6 +178,11 @@ public sealed class PayoutRunContext
     public Balance[] Balances { get; }
 
     public decimal Total => Balances.Sum(x => x.Amount);
+
+    /// <summary>True when a wallet refused a send: finalize re-credits those payees and still trips the breaker.</summary>
+    public bool HasSendRejection => sendRejections > 0;
+
+    public string FirstSendRejection { get; private set; }
 
     /// <summary>
     /// Marks reserved items as paid with their transaction id, inside the caller's transaction. Re-running the same
@@ -183,8 +217,17 @@ public sealed class PayoutRunContext
             items[address] = (PayoutItemState.Paid, txId);
     }
 
-    /// <summary>The node refused these payees explicitly: the coins did not leave, finalize re-credits them.</summary>
+    /// <summary>A pre-check excluded these payees before any send was attempted: finalize re-credits them, no trip.</summary>
     public void Reject(IEnumerable<Balance> balances, string reason) => Transition(balances, PayoutItemState.Failed, reason);
+
+    /// <summary>The wallet refused the send with a before-signing error: finalize re-credits them and trips the breaker.</summary>
+    public void RejectBySend(IEnumerable<Balance> balances, string reason)
+    {
+        Transition(balances, PayoutItemState.Failed, reason);
+
+        if(Interlocked.Increment(ref sendRejections) == 1)
+            FirstSendRejection = PayoutGuardPolicy.Truncate(reason);
+    }
 
     /// <summary>Unknown outcome for these payees: finalize marks them unresolved and trips the breaker.</summary>
     public void Unresolved(IEnumerable<Balance> balances, string reason) => Transition(balances, PayoutItemState.Unresolved, reason);
@@ -269,14 +312,7 @@ public class PayoutGuard : IPayoutGuard
         var poolId = pool.Id;
         var cfg = pool.PaymentProcessing?.Guard;
 
-        if(cfg == null)
-        {
-            // fail closed: a pool without a guard block never pays
-            await TripAsync(poolId, "guard config missing (paymentProcessing.guard)");
-            return Skip(poolId, "guard config missing");
-        }
-
-        if(!cfg.Enabled)
+        if(cfg is { Enabled: false })
             return new PayoutGuardDecision.Legacy();
 
         var state = await cf.Run(con => repo.GetStateAsync(con, poolId));
@@ -284,16 +320,15 @@ public class PayoutGuard : IPayoutGuard
         if(state?.Tripped == true)
             return Skip(poolId, $"breaker tripped since {state.TrippedAt:u}: {state.TrippedReason} — payout-guard.sh reset after checking");
 
-        var openRuns = await cf.Run(con => repo.GetOpenRunsAsync(con, poolId));
-
-        if(openRuns.Length > 0)
+        if(cfg == null)
         {
-            var open = openRuns[0];
-            var reason = $"open run {open.RunId} ({open.Status}) from {open.Created:u} — payout-guard.sh resolve";
-
-            await TripAsync(poolId, reason);
-            return Skip(poolId, reason);
+            // fail closed: a pool without a guard block never pays (tripped once, not re-notified every tick)
+            await TripAsync(poolId, "guard config missing (paymentProcessing.guard)");
+            return Skip(poolId, "guard config missing");
         }
+
+        if(await TripOnOpenRunAsync(poolId, "found before a payout run"))
+            return Skip(poolId, "open run — payout-guard.sh resolve");
 
         if(!cfg.PayoutsEnabled)
             return Skip(poolId, "payoutsEnabled = false");
@@ -313,13 +348,14 @@ public class PayoutGuard : IPayoutGuard
                 return Skip(poolId, "only the pool wallet address is above the minimum");
         }
 
-        var normalized = candidates.Select(x => x with { Amount = handler.NormalizePayoutAmount(x.Amount) });
-        var capped = PayoutGuardPolicy.ApplyPerPayoutCap(normalized, cfg.PerPayoutCap);
+        // cap first, then round the way the node will send it, so a cap with more decimals than the coin never sends more than reserved
+        var capped = PayoutGuardPolicy.ApplyPerPayoutCap(candidates, cfg.PerPayoutCap)
+            .Select(x => x with { Amount = handler.NormalizePayoutAmount(x.Amount) })
+            .Where(x => x.Amount > 0)
+            .ToArray();
 
         if(capped.Length == 0)
             return Skip(poolId, "nothing payable after normalisation");
-
-        var batch = capped.Sum(x => x.Amount);
 
         // the wallet is asked outside the database transaction
         var wallet = await handler.GetWalletBalanceAsync(ct);
@@ -327,21 +363,11 @@ public class PayoutGuard : IPayoutGuard
         if(wallet == null)
             return Skip(poolId, "wallet balance unavailable");
 
-        var walletReason = PayoutGuardPolicy.WalletTripReasonOrNull(wallet, batch);
-
-        if(walletReason != null)
-        {
-            await TripAsync(poolId, walletReason);
-            return Skip(poolId, walletReason);
-        }
-
-        if(PayoutGuardPolicy.WalletUnlockedShort(wallet, batch))
-            return Skip(poolId, $"unlocked wallet balance {wallet.Unlocked} below the batch {batch}");
-
         var runId = Guid.NewGuid();
         var recipients = pool.RewardRecipients?.Select(x => x.Address).Where(x => !string.IsNullOrEmpty(x)).ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>();
         var coin = pool.Template.Symbol;
         string tripReason = null;
+        string deferNote = null;
 
         try
         {
@@ -352,22 +378,58 @@ public class PayoutGuard : IPayoutGuard
                 if(locked.Tripped)
                     return new PayoutGuardDecision.Skip($"breaker tripped: {locked.TrippedReason}");
 
+                // the one-open-run rule is enforced under the lock as well
+                var open = await repo.GetOpenRunsAsync(con, tx, poolId);
+
+                if(open.Length > 0)
+                {
+                    tripReason = $"open run {open[0].RunId} ({open[0].Status}) from {open[0].Created:u} — payout-guard.sh resolve";
+                    await repo.MarkRunUnresolvedAsync(con, tx, open[0].RunId, "left open — found before a payout run");
+                    await repo.TripAsync(con, tx, poolId, tripReason);
+                    return new PayoutGuardDecision.Skip(tripReason);
+                }
+
                 var paid24h = await repo.GetPaidLast24hAsync(con, tx, poolId);
                 var credited24h = await repo.GetCreditedLast24hAsync(con, tx, poolId);
                 var blocks24h = await repo.GetCreditedBlocksLast24hAsync(con, tx, poolId);
 
-                var reason = PayoutGuardPolicy.DailyCapReasonOrNull(paid24h, batch, cfg.DailyCap) ??
-                    PayoutGuardPolicy.CreditAnomalyReasonOrNull(credited24h, blocks24h, cfg.NominalBlockReward, cfg.CreditMultiplier);
+                var anomaly = PayoutGuardPolicy.CreditAnomalyReasonOrNull(credited24h, blocks24h, cfg.NominalBlockReward, cfg.CreditMultiplier);
 
-                if(reason != null)
+                if(anomaly != null)
                 {
-                    await repo.TripAsync(con, tx, poolId, reason);
+                    await repo.TripAsync(con, tx, poolId, anomaly);
                     await repo.UpdateRunStatsAsync(con, tx, poolId, paid24h, credited24h, wallet.Total);
-                    tripReason = reason;
-                    return new PayoutGuardDecision.Skip(reason);
+                    tripReason = anomaly;
+                    return new PayoutGuardDecision.Skip(anomaly);
                 }
 
-                foreach(var balance in capped)
+                // the daily cap defers, it does not trip: whatever fits into the remaining room is paid now
+                var (pay, deferred) = PayoutGuardPolicy.ApplyDailyCap(capped, paid24h, cfg.DailyCap);
+
+                if(deferred.Length > 0)
+                    deferNote = $"daily cap: {deferred.Length} payee(s) ({deferred.Sum(x => x.Amount)}) deferred — {paid24h} paid in the last 24 h, cap {cfg.DailyCap}";
+
+                if(pay.Length == 0)
+                {
+                    await repo.UpdateRunStatsAsync(con, tx, poolId, paid24h, credited24h, wallet.Total);
+                    return new PayoutGuardDecision.Skip(deferNote ?? "daily cap reached");
+                }
+
+                var batch = pay.Sum(x => x.Amount);
+                var walletReason = PayoutGuardPolicy.WalletTripReasonOrNull(wallet, batch);
+
+                if(walletReason != null)
+                {
+                    await repo.TripAsync(con, tx, poolId, walletReason);
+                    await repo.UpdateRunStatsAsync(con, tx, poolId, paid24h, credited24h, wallet.Total);
+                    tripReason = walletReason;
+                    return new PayoutGuardDecision.Skip(walletReason);
+                }
+
+                if(PayoutGuardPolicy.WalletUnlockedShort(wallet, batch))
+                    return new PayoutGuardDecision.Skip($"unlocked wallet balance {wallet.Unlocked} below the batch {batch}");
+
+                foreach(var balance in pay)
                 {
                     var current = await repo.GetBalanceForUpdateAsync(con, tx, poolId, balance.Address);
 
@@ -382,10 +444,10 @@ public class PayoutGuard : IPayoutGuard
                     Coin = coin,
                     Status = PayoutRunStatus.Reserved,
                     AmountTotal = batch,
-                    PayeeCount = capped.Length
+                    PayeeCount = pay.Length
                 };
 
-                var items = capped.Select(x => new PayoutRunItem
+                var items = pay.Select(x => new PayoutRunItem
                 {
                     RunId = runId,
                     Address = x.Address,
@@ -396,19 +458,24 @@ public class PayoutGuard : IPayoutGuard
 
                 await repo.InsertRunAsync(con, tx, run, items);
 
-                foreach(var balance in capped)
+                foreach(var balance in pay)
                     await balanceRepo.AddAmountAsync(con, tx, poolId, balance.Address, -balance.Amount, "Payout reserved", $"payout:{runId}");
 
                 await repo.UpdateRunStatsAsync(con, tx, poolId, paid24h + batch, credited24h, wallet.Total);
 
-                return new PayoutGuardDecision.Run(new PayoutRunContext(runId, poolId, capped, repo));
+                return new PayoutGuardDecision.Run(new PayoutRunContext(runId, poolId, pay, repo));
             });
 
             if(tripReason != null)
                 Notify(poolId, tripReason);
 
+            if(deferNote != null && ShouldLog($"{poolId}:defer"))
+                logger.Warn(() => $"[{poolId}] {deferNote}");
+
             if(decision is PayoutGuardDecision.Run reserved)
-                logger.Info(() => $"[{poolId}] Payout run {reserved.Context.RunId} reserved: {batch} to {capped.Length} address(es)");
+                logger.Info(() => $"[{poolId}] Payout run {reserved.Context.RunId} reserved: {reserved.Context.Total} to {reserved.Context.Balances.Length} address(es)");
+            else if(decision is PayoutGuardDecision.Skip skip)
+                return Skip(poolId, skip.Reason);
 
             return decision;
         }
@@ -431,10 +498,12 @@ public class PayoutGuard : IPayoutGuard
         string tripReason = null;
         var paidCount = 0;
         var failedCount = 0;
+        var unresolvedCount = 0;
 
         await cf.RunTx(async (con, tx) =>
         {
-            var items = await repo.GetItemsAsync(con, tx, run.RunId);
+            // items are locked: the operator script cannot resolve them underneath this transaction
+            var items = await repo.GetItemsForUpdateAsync(con, tx, run.RunId);
 
             foreach(var item in items)
             {
@@ -445,15 +514,24 @@ public class PayoutGuard : IPayoutGuard
                 }
 
                 if(item.Status != PayoutRunStatus.Reserved)
+                {
+                    // something settled this item while the run was in flight (a resolve on a live run): never touch its balance
+                    tripReason ??= $"run {run.RunId}: item {item.Address} is {item.Status} although the run was still sending — resolved by hand during a live run?";
                     continue;
+                }
 
                 var memory = snapshot.TryGetValue(item.Address, out var known) ? known : (State: PayoutItemState.Reserved, Detail: null);
 
                 if(memory.State == PayoutItemState.Failed)
                 {
-                    var detail = memory.Detail ?? "rejected by the node";
+                    var detail = memory.Detail ?? "rejected before sending";
 
-                    await repo.MarkItemAsync(con, tx, run.RunId, item.Address, PayoutRunStatus.Failed, detail);
+                    if(await repo.MarkReservedItemAsync(con, tx, run.RunId, item.Address, PayoutRunStatus.Failed, detail) != 1)
+                    {
+                        tripReason ??= $"run {run.RunId}: item {item.Address} changed underneath finalize";
+                        continue;
+                    }
+
                     await balanceRepo.AddAmountAsync(con, tx, run.PoolId, item.Address, item.Amount, $"Payout failed: {detail}", $"payout:{run.RunId}", "payout-recredit");
                     failedCount++;
                     continue;
@@ -464,14 +542,21 @@ public class PayoutGuard : IPayoutGuard
                     memory.Detail :
                     PayoutGuardPolicy.Truncate(handlerError?.Message) ?? "handler returned without confirming the payment";
 
-                await repo.MarkItemAsync(con, tx, run.RunId, item.Address, PayoutRunStatus.Unresolved, reason);
+                await repo.MarkReservedItemAsync(con, tx, run.RunId, item.Address, PayoutRunStatus.Unresolved, reason);
+                unresolvedCount++;
                 tripReason ??= $"run {run.RunId} unresolved for {item.Address}: {reason}";
             }
 
-            var status = tripReason != null ? PayoutRunStatus.Unresolved :
+            if(tripReason == null && run.HasSendRejection)
+                tripReason = $"run {run.RunId}: the wallet refused a send ({run.FirstSendRejection}) — payees re-credited; check the wallet before the next run";
+
+            var status = unresolvedCount > 0 ? PayoutRunStatus.Unresolved :
                 paidCount > 0 ? PayoutRunStatus.Paid : PayoutRunStatus.Failed;
 
-            await repo.UpdateRunStatusAsync(con, tx, run.RunId, status, PayoutGuardPolicy.Truncate(tripReason ?? handlerError?.Message));
+            var changed = await repo.UpdateReservedRunStatusAsync(con, tx, run.RunId, status, PayoutGuardPolicy.Truncate(tripReason ?? handlerError?.Message));
+
+            if(changed != 1)
+                tripReason ??= $"run {run.RunId} was no longer reserved when finalize ran — resolved by hand during a live run?";
 
             if(tripReason != null)
                 await repo.TripAsync(con, tx, run.PoolId, tripReason);
@@ -497,14 +582,37 @@ public class PayoutGuard : IPayoutGuard
             if(state?.Tripped == true)
                 logger.Warn(() => $"[{pool.Id}] Payout breaker is tripped since {state.TrippedAt:u}: {state.TrippedReason} — a restart never resets it (payout-guard.sh reset)");
 
-            var openRuns = await cf.Run(con => repo.GetOpenRunsAsync(con, pool.Id));
-
-            if(openRuns.Length > 0)
-            {
-                var open = openRuns[0];
-                await TripAsync(pool.Id, $"open run {open.RunId} ({open.Status}) found at startup — payout-guard.sh resolve");
-            }
+            await TripOnOpenRunAsync(pool.Id, "found at startup");
         }
+    }
+
+    /// <summary>
+    /// An open run outside a payout tick is the leftover of a crash: its reserved items become unresolved (the operator
+    /// script only touches unresolved runs) and the pool trips. Returns true when a run was found.
+    /// </summary>
+    private async Task<bool> TripOnOpenRunAsync(string poolId, string where)
+    {
+        string reason = null;
+
+        await cf.RunTx(async (con, tx) =>
+        {
+            await repo.GetStateForUpdateAsync(con, tx, poolId);
+            var open = await repo.GetOpenRunsAsync(con, tx, poolId);
+
+            if(open.Length == 0)
+                return;
+
+            foreach(var run in open.Where(x => x.Status == PayoutRunStatus.Reserved))
+                await repo.MarkRunUnresolvedAsync(con, tx, run.RunId, $"left open — {where}");
+
+            reason = $"open run {open[0].RunId} ({open[0].Status}) from {open[0].Created:u} {where} — payout-guard.sh resolve";
+            await repo.TripAsync(con, tx, poolId, reason);
+        });
+
+        if(reason != null)
+            Notify(poolId, reason);
+
+        return reason != null;
     }
 
     private async Task TripAsync(string poolId, string reason)

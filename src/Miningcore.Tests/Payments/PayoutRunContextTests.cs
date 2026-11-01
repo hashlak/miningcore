@@ -71,6 +71,21 @@ public class PayoutRunContextTests
     }
 
     [Fact]
+    public void Send_Rejections_Are_Remembered_For_The_Trip()
+    {
+        var ctx = Context();
+        Assert.False(ctx.HasSendRejection);
+
+        ctx.Reject(new[] { B("a", 5) }, "held back");
+        Assert.False(ctx.HasSendRejection);
+
+        ctx.RejectBySend(new[] { B("b", 7) }, "sendmany returned error: Insufficient funds code -6");
+        Assert.True(ctx.HasSendRejection);
+        Assert.Contains("-6", ctx.FirstSendRejection);
+        Assert.Equal(PayoutItemState.Failed, ctx.Snapshot()["b"].State);
+    }
+
+    [Fact]
     public void First_Verdict_Wins_And_Strangers_Are_Ignored()
     {
         var ctx = Context();

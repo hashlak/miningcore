@@ -1176,6 +1176,12 @@ public partial class ClusterPaymentProcessingConfig
     public int Interval { get; set; }
 
     /// <summary>
+    /// hashlak: a pool with paymentProcessing.guard.enabled = false (upstream send-then-debit) is refused unless this
+    /// cluster-wide flag says so explicitly — never on a mainnet cluster.
+    /// </summary>
+    public bool AllowUnguardedPools { get; set; }
+
+    /// <summary>
     /// Indentifier used in coinbase transactions to identify the pool
     /// </summary>
     public string CoinbaseString  { get; set; }

@@ -433,6 +433,15 @@ public class XelisPayoutHandler : PayoutHandlerBase,
         return ReadWalletBalanceAsync(ct);
     }
 
+    // build_transaction receives Math.Floor(amount × SmallestUnit): reserve exactly that (no dust between reserved and sent)
+    public override decimal NormalizePayoutAmount(decimal amount)
+    {
+        return Math.Floor(amount * XelisConstants.SmallestUnit) / XelisConstants.SmallestUnit;
+    }
+
+    // xelis_wallet's build_transaction broadcasts by default and its error codes are not documented as pre-broadcast:
+    // no code is ever treated as "not sent" (the base default) — a refused page trips the breaker for a human look
+
     #endregion // IPayoutHandler
 
     private async Task<WalletBalance> ReadWalletBalanceAsync(CancellationToken ct)

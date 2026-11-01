@@ -235,6 +235,12 @@ public class ClusterConfigValidator : AbstractValidator<ClusterConfig>
         RuleFor(j => j.PaymentProcessing)
             .NotNull();
 
+        // hashlak payout guard: switching the guard off on a pool is a cluster-level decision, never a per-pool slip
+        RuleFor(j => j.Pools)
+            .Must((cc, pools) => cc.PaymentProcessing?.AllowUnguardedPools == true ||
+                pools == null || pools.All(p => p.PaymentProcessing?.Guard?.Enabled != false))
+            .WithMessage("Cluster: a pool has paymentProcessing.guard.enabled = false; set paymentProcessing.allowUnguardedPools = true at cluster level to allow it (never on mainnet)");
+
         RuleFor(j => j.Persistence)
             .NotNull()
             .When(x => x.PaymentProcessing?.Enabled == true && x.ShareRelay == null);

@@ -10,6 +10,8 @@ public class PayoutGuardPolicyTests
 {
     private static Balance B(string address, decimal amount) => new() { PoolId = "p", Address = address, Amount = amount };
 
+    private static bool BitcoinNotSent(int code) => code is -3 or -5 or -6 or -8 or -13 or -14;
+
     [Fact]
     public void PerPayoutCap_Truncates_Drops_Zero_And_Keeps_Order()
     {
@@ -21,11 +23,24 @@ public class PayoutGuardPolicyTests
     }
 
     [Fact]
-    public void DailyCap_Is_Inclusive()
+    public void DailyCap_Pays_What_Fits_Largest_First_And_Defers_The_Rest()
     {
-        Assert.Null(PayoutGuardPolicy.DailyCapReasonOrNull(90, 10, 100));
-        Assert.NotNull(PayoutGuardPolicy.DailyCapReasonOrNull(90, 10.000000000001m, 100));
-        Assert.Contains("daily cap", PayoutGuardPolicy.DailyCapReasonOrNull(100, 1, 100));
+        var (pay, deferred) = PayoutGuardPolicy.ApplyDailyCap(new[] { B("a", 5), B("b", 10), B("c", 2) }, 90, 100);
+
+        Assert.Equal(new[] { "b" }, pay.Select(x => x.Address));               // room 10: 10 fits, then 5 and 2 do not
+        Assert.Equal(new[] { "a", "c" }, deferred.Select(x => x.Address));
+
+        (pay, deferred) = PayoutGuardPolicy.ApplyDailyCap(new[] { B("a", 5), B("b", 10), B("c", 2) }, 93, 100);
+        Assert.Equal(new[] { "a", "c" }, pay.Select(x => x.Address));          // room 7: 10 skipped, 5 + 2 fit
+        Assert.Equal(new[] { "b" }, deferred.Select(x => x.Address));
+
+        (pay, deferred) = PayoutGuardPolicy.ApplyDailyCap(new[] { B("a", 5) }, 100, 100);
+        Assert.Empty(pay);
+        Assert.Single(deferred);
+
+        (pay, deferred) = PayoutGuardPolicy.ApplyDailyCap(new[] { B("a", 5), B("b", 10) }, 0, 100);
+        Assert.Equal(2, pay.Length);
+        Assert.Empty(deferred);
     }
 
     [Fact]
@@ -51,15 +66,23 @@ public class PayoutGuardPolicyTests
     }
 
     [Theory]
-    [InlineData(-6, false, PayoutFailureKind.Rejected)]     // explicit daemon error: coins did not leave
-    [InlineData(-4, false, PayoutFailureKind.Rejected)]
+    [InlineData(-6, false, PayoutFailureKind.Rejected)]     // listed by the handler as raised before signing
+    [InlineData(-5, false, PayoutFailureKind.Rejected)]
+    [InlineData(-4, false, PayoutFailureKind.Unresolved)]   // not listed ("transaction commit failed"): the coins may have left
+    [InlineData(-25, false, PayoutFailureKind.Unresolved)]
     [InlineData(-500, false, PayoutFailureKind.Unresolved)] // transport error / timeout: the node may have acted
     [InlineData(null, false, PayoutFailureKind.Unresolved)] // no code at all
     [InlineData(null, true, PayoutFailureKind.Unresolved)]
     [InlineData(-6, true, PayoutFailureKind.Unresolved)]    // an exception always wins
     public void Classify(int? code, bool withException, PayoutFailureKind expected)
     {
-        Assert.Equal(expected, PayoutGuardPolicy.Classify(code, withException ? new Exception("boom") : null));
+        Assert.Equal(expected, PayoutGuardPolicy.Classify(code, withException ? new Exception("boom") : null, BitcoinNotSent));
+    }
+
+    [Fact]
+    public void Classify_With_No_Listed_Codes_Never_Rejects()
+    {
+        Assert.Equal(PayoutFailureKind.Unresolved, PayoutGuardPolicy.Classify(-32004, null, _ => false));
     }
 
     [Fact]

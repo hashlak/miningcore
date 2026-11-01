@@ -113,6 +113,26 @@ public class PayoutGuardRepository : IPayoutGuardRepository
         return (await con.QueryAsync<PayoutRun>(query, new { poolId })).ToArray();
     }
 
+    public async Task<PayoutRun[]> GetOpenRunsAsync(IDbConnection con, IDbTransaction tx, string poolId)
+    {
+        var query = $"SELECT {RunColumns} FROM payout_runs WHERE poolid = @poolId AND status IN ('reserved', 'unresolved') ORDER BY created FOR UPDATE";
+
+        return (await con.QueryAsync<PayoutRun>(query, new { poolId }, tx)).ToArray();
+    }
+
+    public async Task MarkRunUnresolvedAsync(IDbConnection con, IDbTransaction tx, Guid runId, string reason)
+    {
+        const string items = @"UPDATE payout_run_items SET status = 'unresolved', error = @reason, updated = now() at time zone 'utc'
+            WHERE run_id = @runId AND status = 'reserved'";
+
+        await con.ExecuteAsync(items, new { runId, reason }, tx);
+
+        const string run = @"UPDATE payout_runs SET status = 'unresolved', error = @reason, updated = now() at time zone 'utc'
+            WHERE run_id = @runId AND status = 'reserved'";
+
+        await con.ExecuteAsync(run, new { runId, reason }, tx);
+    }
+
     public async Task InsertRunAsync(IDbConnection con, IDbTransaction tx, PayoutRun run, PayoutRunItem[] items)
     {
         const string runQuery = @"INSERT INTO payout_runs(run_id, poolid, coin, status, amount_total, payee_count, error, created, updated)
@@ -140,24 +160,25 @@ public class PayoutGuardRepository : IPayoutGuardRepository
         return affected;
     }
 
-    public Task MarkItemAsync(IDbConnection con, IDbTransaction tx, Guid runId, string address, string status, string error)
+    public Task<int> MarkReservedItemAsync(IDbConnection con, IDbTransaction tx, Guid runId, string address, string status, string error)
     {
         const string query = @"UPDATE payout_run_items SET status = @status, error = @error, updated = now() at time zone 'utc'
-            WHERE run_id = @runId AND address = @address";
+            WHERE run_id = @runId AND address = @address AND status = 'reserved'";
 
         return con.ExecuteAsync(query, new { runId, address, status, error }, tx);
     }
 
-    public async Task<PayoutRunItem[]> GetItemsAsync(IDbConnection con, IDbTransaction tx, Guid runId)
+    public async Task<PayoutRunItem[]> GetItemsForUpdateAsync(IDbConnection con, IDbTransaction tx, Guid runId)
     {
-        var query = $"SELECT {ItemColumns} FROM payout_run_items WHERE run_id = @runId ORDER BY address";
+        var query = $"SELECT {ItemColumns} FROM payout_run_items WHERE run_id = @runId ORDER BY address FOR UPDATE";
 
         return (await con.QueryAsync<PayoutRunItem>(query, new { runId }, tx)).ToArray();
     }
 
-    public Task UpdateRunStatusAsync(IDbConnection con, IDbTransaction tx, Guid runId, string status, string error)
+    public Task<int> UpdateReservedRunStatusAsync(IDbConnection con, IDbTransaction tx, Guid runId, string status, string error)
     {
-        const string query = @"UPDATE payout_runs SET status = @status, error = @error, updated = now() at time zone 'utc' WHERE run_id = @runId";
+        const string query = @"UPDATE payout_runs SET status = @status, error = @error, updated = now() at time zone 'utc'
+            WHERE run_id = @runId AND status = 'reserved'";
 
         return con.ExecuteAsync(query, new { runId, status, error }, tx);
     }

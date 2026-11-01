@@ -252,6 +252,9 @@
         },
         "interval": {
           "type": "integer"
+        },
+        "allowUnguardedPools": {
+          "type": "boolean"
         }
       }
     },
