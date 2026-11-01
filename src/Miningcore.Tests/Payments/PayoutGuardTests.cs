@@ -51,6 +51,7 @@ public class PayoutGuardTests
     private static PoolConfig Pool(PayoutGuardConfig guardConfig) => new()
     {
         Id = "p",
+        Address = "poolwallet",
         Template = new BitcoinTemplate { Symbol = "TST" },
         RewardRecipients = new[] { new RewardRecipient { Address = "fee", Percentage = 0 } },
         PaymentProcessing = new PoolPaymentProcessingConfig { Enabled = true, MinimumPayment = 1, Guard = guardConfig }
@@ -161,6 +162,24 @@ public class PayoutGuardTests
         tx.Received(1).Commit();
         tx.DidNotReceive().Rollback();
         await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Pool_Wallet_Address_Is_Never_Reserved()
+    {
+        PayoutRunItem[] items = null;
+        repo.InsertRunAsync(con, tx, Arg.Any<PayoutRun>(), Arg.Do<PayoutRunItem[]>(i => items = i)).Returns(Task.CompletedTask);
+        var withOwn = candidates.Append(B("poolwallet", 9)).ToArray();
+
+        var decision = await guard.PrepareRunAsync(Pool(Config()), handler, withOwn, CancellationToken.None);
+
+        Assert.IsType<PayoutGuardDecision.Run>(decision);
+        Assert.DoesNotContain(items, x => x.Address == "poolwallet");
+        Assert.Equal(3, items.Length);
+        await balanceRepo.DidNotReceive().AddAmountAsync(con, tx, "p", "poolwallet", Arg.Any<decimal>(), Arg.Any<string>(), Arg.Any<string[]>());
+
+        var onlyOwn = await guard.PrepareRunAsync(Pool(Config()), handler, new[] { B("poolwallet", 9) }, CancellationToken.None);
+        Assert.IsType<PayoutGuardDecision.Skip>(onlyOwn);
     }
 
     [Fact]

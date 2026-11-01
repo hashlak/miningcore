@@ -90,10 +90,11 @@ public class PayoutGuardRepository : IPayoutGuardRepository
 
     public Task<int> GetCreditedBlocksLast24hAsync(IDbConnection con, IDbTransaction tx, string poolId)
     {
-        // PPLNS/PROP credits read "Reward for N shares for block H", recipient credits "Reward for block H"
-        const string query = @"SELECT COUNT(DISTINCT substring(usage from 'block ([0-9]+)$')) FROM balance_changes
-            WHERE poolid = @poolId AND amount > 0 AND usage LIKE 'Reward for %'
-              AND created >= (now() at time zone 'utc') - interval '24 hours'";
+        // Blocks, not heights: Xelis credits several blocks at one height (normal + side). Confirmed blocks found in the
+        // last 24 h plus the confirmation lag (ZEPH 60 x 2 min, RVN 102 x 1 min) — the blocks whose rewards landed in the window.
+        const string query = @"SELECT COUNT(*) FROM blocks
+            WHERE poolid = @poolId AND status = 'confirmed'
+              AND created >= (now() at time zone 'utc') - interval '26 hours'";
 
         return con.ExecuteScalarAsync<int>(query, new { poolId }, tx);
     }

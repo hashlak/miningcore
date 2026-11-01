@@ -298,6 +298,21 @@ public class PayoutGuard : IPayoutGuard
         if(!cfg.PayoutsEnabled)
             return Skip(poolId, "payoutsEnabled = false");
 
+        // the pool's own wallet address can carry a miner balance (someone mined to it): paying it is a transfer to self
+        // that moves nothing and that some wallets refuse (Xelis: "Sender is receiver") — never reserve it
+        var own = candidates.Where(x => string.Equals(x.Address, pool.Address, StringComparison.Ordinal)).ToArray();
+
+        if(own.Length > 0)
+        {
+            if(ShouldLog($"{poolId}:own"))
+                logger.Warn(() => $"[{poolId}] The pool wallet address holds a miner balance of {own.Sum(x => x.Amount)} — never paid out (transfer to self); clear it by hand if needed");
+
+            candidates = candidates.Except(own).ToArray();
+
+            if(candidates.Length == 0)
+                return Skip(poolId, "only the pool wallet address is above the minimum");
+        }
+
         var normalized = candidates.Select(x => x with { Amount = handler.NormalizePayoutAmount(x.Amount) });
         var capped = PayoutGuardPolicy.ApplyPerPayoutCap(normalized, cfg.PerPayoutCap);
 
@@ -508,14 +523,20 @@ public class PayoutGuard : IPayoutGuard
 
     private PayoutGuardDecision Skip(string poolId, string reason)
     {
-        var now = DateTime.UtcNow;
-        var last = lastSkipLog.GetOrAdd(poolId, DateTime.MinValue);
-
-        if(now - last >= skipLogInterval && lastSkipLog.TryUpdate(poolId, now, last))
+        if(ShouldLog(poolId))
             logger.Info(() => $"[{poolId}] Payout skipped: {reason}");
         else
             logger.Debug(() => $"[{poolId}] Payout skipped: {reason}");
 
         return new PayoutGuardDecision.Skip(reason);
+    }
+
+    /// <summary>True once per hour per key: recurring conditions are logged, not spammed, every 10-minute tick.</summary>
+    private bool ShouldLog(string key)
+    {
+        var now = DateTime.UtcNow;
+        var last = lastSkipLog.GetOrAdd(key, DateTime.MinValue);
+
+        return now - last >= skipLogInterval && lastSkipLog.TryUpdate(key, now, last);
     }
 }
