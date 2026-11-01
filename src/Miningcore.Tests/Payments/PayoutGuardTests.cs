@@ -33,6 +33,8 @@ public class PayoutGuardTests
     public PayoutGuardTests()
     {
         cf.OpenConnectionAsync().Returns(Task.FromResult(con));
+        repo.TryLockPoolAsync(con, "p").Returns(Task.FromResult(true));
+        repo.UnlockPoolAsync(con, "p").Returns(Task.CompletedTask);
         con.BeginTransaction(Arg.Any<IsolationLevel>()).Returns(tx);
 
         repo.GetStateAsync(con, "p").Returns(Task.FromResult<PayoutGuardState>(null));
@@ -98,6 +100,41 @@ public class PayoutGuardTests
         var skip = Assert.IsType<PayoutGuardDecision.Skip>(decision);
         Assert.Contains("manual", skip.Reason);
         await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
+        await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Lock_Held_By_Another_Process_Skips_Without_Writes()
+    {
+        repo.TryLockPoolAsync(con, "p").Returns(Task.FromResult(false));
+        var stale = new PayoutRun { RunId = Guid.NewGuid(), PoolId = "p", Status = PayoutRunStatus.Reserved };
+        repo.GetOpenRunsAsync(con, tx, "p").Returns(Task.FromResult(new[] { stale }));
+
+        var decision = await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None);
+
+        // the other process is sending right now: its reserved run is live, nothing is marked, nothing is tripped
+        var skip = Assert.IsType<PayoutGuardDecision.Skip>(decision);
+        Assert.Contains("lock", skip.Reason);
+        await repo.DidNotReceiveWithAnyArgs().MarkRunUnresolvedAsync(default, default, default, default);
+        await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
+        await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
+        con.Received().Dispose();
+    }
+
+    [Fact]
+    public async Task Tripped_Pool_Marks_Stale_Reserved_Run_Quietly()
+    {
+        repo.GetStateAsync(con, "p").Returns(Task.FromResult(new PayoutGuardState { PoolId = "p", Tripped = true, TrippedReason = "manual" }));
+        var stale = new PayoutRun { RunId = Guid.NewGuid(), PoolId = "p", Status = PayoutRunStatus.Reserved };
+        repo.GetOpenRunsAsync(con, tx, "p").Returns(Task.FromResult(new[] { stale }));
+
+        var decision = await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None);
+
+        // a crash leftover on a pool tripped by hand still becomes unresolved (the script only touches unresolved runs),
+        // but the pool is already tripped: no second page
+        Assert.IsType<PayoutGuardDecision.Skip>(decision);
+        await repo.Received(1).MarkRunUnresolvedAsync(con, tx, stale.RunId, Arg.Any<string>());
+        bus.DidNotReceive().SendMessage(Arg.Any<AdminNotification>());
         await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
     }
 

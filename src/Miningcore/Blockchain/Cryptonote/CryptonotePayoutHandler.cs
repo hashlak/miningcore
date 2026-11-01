@@ -250,6 +250,18 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
     // TX_NOT_POSSIBLE -16, NOT_ENOUGH_MONEY -17, ZERO_DESTINATION -20. The generic -4 and everything else may have relayed.
     protected override bool IsNotSentErrorCode(int rpcErrorCode)
     {
+        return IsNotSentCode(rpcErrorCode);
+    }
+
+    /// <summary>
+    /// monero-wallet-rpc `transfer` errors raised before a transaction exists: wrong address (-2), wrong payment id (-5),
+    /// not enough money / unlocked money (-16, -17) and wrong tx-key or zero destination (-20). The generic -4 (also used
+    /// for "tx too big" and daemon-relay problems), -3 (daemon busy), -18 (tx not possible), -38 (no connection to the
+    /// daemon — the transaction may still be in the daemon) and -500 (timeout) stay unresolved. transfer_split is never
+    /// classified: its outcome is per-transaction.
+    /// </summary>
+    internal static bool IsNotSentCode(int rpcErrorCode)
+    {
         return rpcErrorCode is -2 or -5 or -16 or -17 or -20;
     }
 

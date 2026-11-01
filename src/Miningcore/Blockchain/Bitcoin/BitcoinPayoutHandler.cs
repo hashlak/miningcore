@@ -454,6 +454,17 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
     // Everything else (-4 "transaction commit failed", -25, -26, -500 …) may have left the wallet.
     protected override bool IsNotSentErrorCode(int rpcErrorCode)
     {
+        return IsNotSentCode(rpcErrorCode);
+    }
+
+    /// <summary>
+    /// Bitcoin-core wallet errors raised before anything is relayed: invalid address (-5), invalid amount/params (-3, -8,
+    /// -32602, -32600), insufficient funds (-6), wallet locked (-13) or wrong passphrase (-14). Everything else — notably
+    /// -4 "Transaction commit failed" (may have been relayed), -25/-26 (rejected by the mempool after a broadcast attempt)
+    /// and -500 (timeout) — stays unresolved.
+    /// </summary>
+    internal static bool IsNotSentCode(int rpcErrorCode)
+    {
         return rpcErrorCode is -3 or -5 or -6 or -8 or -13 or -14 or -32602 or -32600;
     }
 

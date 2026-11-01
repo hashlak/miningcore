@@ -171,6 +171,9 @@ public sealed class PayoutRunContext
     private int finalized;
     private int sendRejections;
 
+    /// <summary>The connection holding this pool's advisory payout lock from reservation until finalize (released there).</summary>
+    public IDbConnection LockConnection { get; internal set; }
+
     public Guid RunId { get; }
     public string PoolId { get; }
 
@@ -318,7 +321,11 @@ public class PayoutGuard : IPayoutGuard
         var state = await cf.Run(con => repo.GetStateAsync(con, poolId));
 
         if(state?.Tripped == true)
+        {
+            // a run left reserved by a crash must become unresolved even when the pool was tripped by hand in between (quietly)
+            await TripOnOpenRunAsync(poolId, "found while the pool was tripped", quiet: true);
             return Skip(poolId, $"breaker tripped since {state.TrippedAt:u}: {state.TrippedReason} — payout-guard.sh reset after checking");
+        }
 
         if(cfg == null)
         {
@@ -368,6 +375,16 @@ public class PayoutGuard : IPayoutGuard
         var coin = pool.Template.Symbol;
         string tripReason = null;
         string deferNote = null;
+
+        // the pool's advisory payout lock lives on its own connection from here until finalize: a second process, or
+        // the operator script, that cannot take it knows a run is in flight and leaves its rows alone
+        var lockCon = await cf.OpenConnectionAsync();
+
+        if(!await repo.TryLockPoolAsync(lockCon, poolId))
+        {
+            lockCon.Dispose();
+            return Skip(poolId, "another payout process holds this pool's lock");
+        }
 
         try
         {
@@ -473,7 +490,12 @@ public class PayoutGuard : IPayoutGuard
                 logger.Warn(() => $"[{poolId}] {deferNote}");
 
             if(decision is PayoutGuardDecision.Run reserved)
+            {
+                reserved.Context.LockConnection = lockCon;   // released by FinalizeRunAsync
+                lockCon = null;
                 logger.Info(() => $"[{poolId}] Payout run {reserved.Context.RunId} reserved: {reserved.Context.Total} to {reserved.Context.Balances.Length} address(es)");
+            }
+
             else if(decision is PayoutGuardDecision.Skip skip)
                 return Skip(poolId, skip.Reason);
 
@@ -485,6 +507,30 @@ public class PayoutGuard : IPayoutGuard
             // another writer touched a balance between the candidate query and the lock: nothing was reserved, next tick retries
             return Skip(poolId, ex.Message);
         }
+
+        finally
+        {
+            if(lockCon != null)
+                await ReleaseLockAsync(lockCon, poolId);
+        }
+    }
+
+    private async Task ReleaseLockAsync(IDbConnection lockCon, string poolId)
+    {
+        try
+        {
+            await repo.UnlockPoolAsync(lockCon, poolId);
+        }
+
+        catch(Exception ex)
+        {
+            logger.Warn(() => $"[{poolId}] Could not release the payout lock explicitly ({ex.Message}); closing the connection releases it");
+        }
+
+        finally
+        {
+            lockCon.Dispose();
+        }
     }
 
     public async Task FinalizeRunAsync(PayoutRunContext run, Exception handlerError, CancellationToken ct)
@@ -494,6 +540,23 @@ public class PayoutGuard : IPayoutGuard
         if(!run.TryMarkFinalized())
             return;
 
+        try
+        {
+            await FinalizeLockedAsync(run, handlerError);
+        }
+
+        finally
+        {
+            if(run.LockConnection != null)
+            {
+                await ReleaseLockAsync(run.LockConnection, run.PoolId);
+                run.LockConnection = null;
+            }
+        }
+    }
+
+    private async Task FinalizeLockedAsync(PayoutRunContext run, Exception handlerError)
+    {
         var snapshot = run.Snapshot();
         string tripReason = null;
         var paidCount = 0;
@@ -590,10 +653,43 @@ public class PayoutGuard : IPayoutGuard
     /// An open run outside a payout tick is the leftover of a crash: its reserved items become unresolved (the operator
     /// script only touches unresolved runs) and the pool trips. Returns true when a run was found.
     /// </summary>
-    private async Task<bool> TripOnOpenRunAsync(string poolId, string where)
+    private async Task<bool> TripOnOpenRunAsync(string poolId, string where, bool quiet = false)
     {
         string reason = null;
 
+        // a process that holds the pool's payout lock is sending right now: its reserved rows are live, not stale
+        using var lockCon = await cf.OpenConnectionAsync();
+
+        if(!await repo.TryLockPoolAsync(lockCon, poolId))
+            return false;
+
+        try
+        {
+            await MarkOpenRunsAsync(poolId, where, r => reason = r);
+        }
+
+        finally
+        {
+            try
+            {
+                await repo.UnlockPoolAsync(lockCon, poolId);
+            }
+            catch
+            {
+                // the connection is disposed right after: the session lock goes with it
+            }
+        }
+
+        if(reason != null && !quiet)
+            Notify(poolId, reason);
+        else if(reason != null)
+            logger.Warn(() => $"[{poolId}] {reason}");
+
+        return reason != null;
+    }
+
+    private async Task MarkOpenRunsAsync(string poolId, string where, Action<string> setReason)
+    {
         await cf.RunTx(async (con, tx) =>
         {
             await repo.GetStateForUpdateAsync(con, tx, poolId);
@@ -605,14 +701,10 @@ public class PayoutGuard : IPayoutGuard
             foreach(var run in open.Where(x => x.Status == PayoutRunStatus.Reserved))
                 await repo.MarkRunUnresolvedAsync(con, tx, run.RunId, $"left open — {where}");
 
-            reason = $"open run {open[0].RunId} ({open[0].Status}) from {open[0].Created:u} {where} — payout-guard.sh resolve";
+            var reason = $"open run {open[0].RunId} ({open[0].Status}) from {open[0].Created:u} {where} — payout-guard.sh resolve";
             await repo.TripAsync(con, tx, poolId, reason);
+            setReason(reason);
         });
-
-        if(reason != null)
-            Notify(poolId, reason);
-
-        return reason != null;
     }
 
     private async Task TripAsync(string poolId, string reason)
