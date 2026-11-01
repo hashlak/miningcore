@@ -10,6 +10,15 @@ public interface IPayoutGuardRepository
 {
     Task<PayoutGuardState> GetStateAsync(IDbConnection con, string poolId);
 
+    /// <summary>
+    /// Session-level advisory lock per pool (pg_try_advisory_lock on hashtext('hashlak-payout:' || poolid)): held on a
+    /// dedicated connection from reservation until finalize, so a second process — or the operator script — can tell
+    /// a live run from a stale one. Returns false when another session holds it.
+    /// </summary>
+    Task<bool> TryLockPoolAsync(IDbConnection con, string poolId);
+
+    Task UnlockPoolAsync(IDbConnection con, string poolId);
+
     /// <summary>Creates the pool's state row if missing and locks it (FOR UPDATE) for the rest of the transaction.</summary>
     Task<PayoutGuardState> GetStateForUpdateAsync(IDbConnection con, IDbTransaction tx, string poolId);
 

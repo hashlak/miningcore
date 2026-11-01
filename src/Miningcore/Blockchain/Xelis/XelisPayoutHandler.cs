@@ -273,6 +273,14 @@ public class XelisPayoutHandler : PayoutHandlerBase,
 
         foreach(var balance in balances.Where(x => x.Amount > 0))
         {
+            // wrong network or integrated (security review 2026-11-01, S2/S3): never sent, never trips the pool for everyone
+            if(!XelisJobManager.IsPlainAddress(balance.Address) || !XelisJobManager.IsForNetwork(balance.Address, network))
+            {
+                logger.Error(() => $"[{LogCategory}] Holding back payout of {FormatAmount(balance.Amount)} to {balance.Address}: not a plain address of this network");
+                NotifyPayoutNotSent(new[] { balance }, "not a plain address of this network");
+                continue;
+            }
+
             var validateAddressRequest = new ValidateAddressRequest
             {
                 Address = balance.Address
@@ -364,8 +372,9 @@ public class XelisPayoutHandler : PayoutHandlerBase,
                 if(estimateFeesResponse.Error != null)
                 {
                     logger.Warn(()=> $"[{LogCategory}] '{XelisWalletCommands.EstimateFees}': {estimateFeesResponse.Error.Message} (Code {estimateFeesResponse.Error.Code})");
-                    NotifyPayoutNotSent(page, "estimate_fees failed");
-                    continue;
+                    // wallet-level problem: it would repeat on every later page — stop the run, those pages are certainly unpaid
+                    NotifyPayoutNotSent(balances.Skip(i * pageSize).ToArray(), "estimate_fees failed");
+                    break;
                 }
 
                 var estimatedTransactionFees = Convert.ToDecimal(estimateFeesResponse.Response) / XelisConstants.SmallestUnit;
@@ -399,7 +408,11 @@ public class XelisPayoutHandler : PayoutHandlerBase,
             {
                 logger.Error(()=> $"[{LogCategory}] '{XelisWalletCommands.BuildTransaction}': {buildTransactionResponse.Error.Message} (Code {buildTransactionResponse.Error.Code})");
                 NotifyPayoutFailure(poolConfig.Id, page, $"Daemon command '{XelisWalletCommands.BuildTransaction}' returned error: {buildTransactionResponse.Error.Message} code {buildTransactionResponse.Error.Code}", null, buildTransactionResponse.Error.Code);
-                continue;
+
+                // hashlak payout guard: the run is unresolved from here (a refused page trips the breaker); never keep
+                // sending against a wallet in an unknown state — the pages never attempted are certainly unpaid
+                NotifyPayoutNotSent(balances.Skip((i + 1) * pageSize).ToArray(), "previous batch failed");
+                break;
             }
 
             if(string.IsNullOrEmpty(buildTransactionResponse.Response?.Hash))
@@ -407,7 +420,8 @@ public class XelisPayoutHandler : PayoutHandlerBase,
                 // build_transaction broadcasts by default: without a hash the outcome is unknown, never "not sent"
                 logger.Error(() => $"[{LogCategory}] Payment transaction failed to return a transaction id");
                 NotifyPayoutFailure(poolConfig.Id, page, $"Daemon command '{XelisWalletCommands.BuildTransaction}' returned no transaction hash", null);
-                continue;
+                NotifyPayoutNotSent(balances.Skip((i + 1) * pageSize).ToArray(), "previous batch failed");
+                break;
             }
             else
             {

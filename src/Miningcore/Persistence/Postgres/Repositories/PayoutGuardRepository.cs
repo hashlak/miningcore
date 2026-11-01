@@ -28,6 +28,20 @@ public class PayoutGuardRepository : IPayoutGuardRepository
         return con.QuerySingleOrDefaultAsync<PayoutGuardState>(query, new { poolId });
     }
 
+    public Task<bool> TryLockPoolAsync(IDbConnection con, string poolId)
+    {
+        const string query = "SELECT pg_try_advisory_lock(hashtext('hashlak-payout:' || @poolId))";
+
+        return con.ExecuteScalarAsync<bool>(query, new { poolId });
+    }
+
+    public Task UnlockPoolAsync(IDbConnection con, string poolId)
+    {
+        const string query = "SELECT pg_advisory_unlock(hashtext('hashlak-payout:' || @poolId))";
+
+        return con.ExecuteScalarAsync<bool>(query, new { poolId });
+    }
+
     public async Task<PayoutGuardState> GetStateForUpdateAsync(IDbConnection con, IDbTransaction tx, string poolId)
     {
         const string ensure = @"INSERT INTO payout_guard_state(poolid, updated) VALUES(@poolId, now() at time zone 'utc')

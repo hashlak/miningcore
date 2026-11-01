@@ -17,6 +17,7 @@ using Miningcore.Payments;
 using Miningcore.Persistence;
 using Miningcore.Persistence.Repositories;
 using Miningcore.Stratum;
+using Miningcore.Util;
 using Miningcore.Time;
 using Newtonsoft.Json;
 using static Miningcore.Util.ActionUtils;
@@ -60,8 +61,8 @@ public class CryptonotePool : PoolBase
         // extract worker/miner/paymentid
         var split = loginRequest.Login.Split('.');
         context.Miner = split[0].Trim();
-        context.Worker = split.Length > 1 ? split[1].Trim() : null;
-        context.UserAgent = loginRequest.UserAgent?.Trim();
+        context.Worker = LogSanitizer.WorkerName(split.Length > 1 ? split[1].Trim() : null);   // hashlak: verbatim or w-<hash>, never raw
+        context.UserAgent = LogSanitizer.Name(loginRequest.UserAgent);                         // logged and stored (shares.useragent)
 
         var addressToValidate = context.Miner;
 
@@ -152,7 +153,7 @@ public class CryptonotePool : PoolBase
 
             if(clusterConfig?.Banning?.BanOnLoginFailure is null or true)
             {
-                logger.Info(() => $"[{connection.ConnectionId}] Banning unauthorized worker {context.Miner} for {loginFailureBanTimeout.TotalSeconds} sec");
+                logger.Info(() => $"[{connection.ConnectionId}] Banning unauthorized worker {LogSanitizer.Name(context.Miner)} for {loginFailureBanTimeout.TotalSeconds} sec");
 
                 banManager.Ban(connection.RemoteEndpoint.Address, loginFailureBanTimeout);
 
