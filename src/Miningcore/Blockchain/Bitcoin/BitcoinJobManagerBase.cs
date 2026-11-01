@@ -630,7 +630,8 @@ public abstract class BitcoinJobManagerBase<TJob> : JobManagerBase<TJob>
     /// </summary>
     public virtual async Task<AddressValidation> ValidateAddressDetailedAsync(string address, CancellationToken ct)
     {
-        // base58 and bech32 addresses are plain ASCII letters and digits: junk never reaches the daemon or the logs
+        // base58 and bech32 addresses are plain ASCII letters and digits: junk never reaches the daemon (the pools log
+        // miner-supplied strings only through LogSanitizer)
         if(string.IsNullOrEmpty(address) || address.Length < 20 || address.Length > 100 || !address.All(char.IsAsciiLetterOrDigit))
             return AddressValidation.Invalid;
 

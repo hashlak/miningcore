@@ -17,6 +17,7 @@ using Miningcore.Persistence;
 using Miningcore.Persistence.Repositories;
 using Miningcore.Stratum;
 using Miningcore.Time;
+using Miningcore.Util;
 using Newtonsoft.Json;
 using NLog;
 using static Miningcore.Util.ActionUtils;
@@ -126,12 +127,31 @@ public class XelisPool : PoolBase
         var minerName = split?.FirstOrDefault()?.Trim();
         workerName = split?.Skip(1).FirstOrDefault()?.Trim() ?? workerName;
 
-        // assumes that minerName is an address
-        minerName = await manager.NormalizeAddressAsync(minerName, ct);
+        // hashlak (security review 2026-11-01, N2): the cheap pre-check and the one-address rule come BEFORE any RPC, and a
+        // plain xel:/xet: address never needs split_address — only an integrated address does. Junk and repeated
+        // authorizes on one connection therefore cost the daemon nothing.
+        if(!XelisJobManager.LooksLikeAddress(minerName))
+        {
+            await connection.RespondErrorAsync(StratumError.UnauthorizedWorker, "Authorization failed", request.Id, false);
 
-        // hashlak: one address per connection — the same address again is simply confirmed, another address is refused
+            if(clusterConfig?.Banning?.BanOnLoginFailure is null or true)
+            {
+                logger.Info(() => $"[{connection.ConnectionId}] Banning unauthorized worker {LogSanitizer.Name(minerName)} for {loginFailureBanTimeout.TotalSeconds} sec (not an address)");
+                banManager.Ban(connection.RemoteEndpoint.Address, loginFailureBanTimeout);
+                Disconnect(connection);
+            }
+
+            return;
+        }
+
+        // an integrated address is reduced to its base address (the pool pays the base address); a plain one is used as is,
+        // so the common case costs no RPC at all
+        if(!XelisJobManager.IsPlainAddress(minerName))
+            minerName = await manager.NormalizeAddressAsync(minerName, ct);
+
         if(context.IsAuthorized && !string.IsNullOrEmpty(context.Miner))
         {
+            // one address per connection — the same address again is simply confirmed, another one is refused
             if(string.Equals(context.Miner, minerName, StringComparison.Ordinal))
                 await connection.RespondAsync(new JsonRpcResponse<object>(true, request.Id));
             else
@@ -153,7 +173,7 @@ public class XelisPool : PoolBase
 
         context.IsAuthorized = validation == AddressValidation.Valid;
         context.Miner = minerName;
-        context.Worker = workerName;
+        context.Worker = LogSanitizer.WorkerName(workerName);   // hashlak: 1-32 of [A-Za-z0-9_-], else empty
 
         if(context.IsAuthorized)
         {
@@ -172,7 +192,7 @@ public class XelisPool : PoolBase
             await connection.RespondAsync(response);
 
             // log association
-            logger.Info(() => $"[{connection.ConnectionId}]{(!string.IsNullOrEmpty(context.UserAgent) ? $"[{context.UserAgent}]" : string.Empty)} Authorized worker {workerValue}");
+            logger.Info(() => $"[{connection.ConnectionId}]{(!string.IsNullOrEmpty(context.UserAgent) ? $"[{context.UserAgent}]" : string.Empty)} Authorized worker {LogSanitizer.Name(workerValue)}");
 
             // extract control vars from password
             var staticDiff = GetStaticDiffFromPassparts(passParts);
@@ -202,7 +222,7 @@ public class XelisPool : PoolBase
             if(clusterConfig?.Banning?.BanOnLoginFailure is null or true)
             {
                 // issue short-time ban if unauthorized to prevent DDos on daemon (validateaddress RPC)
-                logger.Info(() => $"[{connection.ConnectionId}]{(!string.IsNullOrEmpty(context.UserAgent) ? $"[{context.UserAgent}]" : string.Empty)} Banning unauthorized worker {minerName} for {loginFailureBanTimeout.TotalSeconds} sec");
+                logger.Info(() => $"[{connection.ConnectionId}]{(!string.IsNullOrEmpty(context.UserAgent) ? $"[{context.UserAgent}]" : string.Empty)} Banning unauthorized worker {LogSanitizer.Name(minerName)} for {loginFailureBanTimeout.TotalSeconds} sec");
 
                 banManager.Ban(connection.RemoteEndpoint.Address, loginFailureBanTimeout);
 

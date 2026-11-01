@@ -16,6 +16,7 @@ using Miningcore.Persistence;
 using Miningcore.Persistence.Repositories;
 using Miningcore.Stratum;
 using Miningcore.Time;
+using Miningcore.Util;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NLog;
@@ -142,7 +143,7 @@ public class BitcoinPool : PoolBase
 
         context.IsAuthorized = validation == AddressValidation.Valid;
         context.Miner = minerName;
-        context.Worker = workerName;
+        context.Worker = LogSanitizer.WorkerName(workerName);   // hashlak: 1-32 of [A-Za-z0-9_-], else empty
 
         if(context.IsAuthorized)
         {
@@ -161,7 +162,7 @@ public class BitcoinPool : PoolBase
             await connection.RespondAsync(response);
 
             // log association
-            logger.Info(() => $"[{connection.ConnectionId}] Authorized worker {workerValue}");
+            logger.Info(() => $"[{connection.ConnectionId}] Authorized worker {LogSanitizer.Name(workerValue)}");
 
             // extract control vars from password
             var staticDiff = GetStaticDiffFromPassparts(passParts);
@@ -187,7 +188,7 @@ public class BitcoinPool : PoolBase
             if(clusterConfig?.Banning?.BanOnLoginFailure is null or true)
             {
                 // issue short-time ban if unauthorized to prevent DDos on daemon (validateaddress RPC)
-                logger.Info(() => $"[{connection.ConnectionId}] Banning unauthorized worker {minerName} for {loginFailureBanTimeout.TotalSeconds} sec");
+                logger.Info(() => $"[{connection.ConnectionId}] Banning unauthorized worker {LogSanitizer.Name(minerName)} for {loginFailureBanTimeout.TotalSeconds} sec");
 
                 banManager.Ban(connection.RemoteEndpoint.Address, loginFailureBanTimeout);
 
