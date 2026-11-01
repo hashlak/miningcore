@@ -254,15 +254,17 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
     }
 
     /// <summary>
-    /// monero-wallet-rpc `transfer` errors raised before a transaction exists: wrong address (-2), wrong payment id (-5),
-    /// not enough money / unlocked money (-16, -17) and wrong tx-key or zero destination (-20). The generic -4 (also used
-    /// for "tx too big" and daemon-relay problems), -3 (daemon busy), -18 (tx not possible), -38 (no connection to the
-    /// daemon — the transaction may still be in the daemon) and -500 (timeout) stay unresolved. transfer_split is never
-    /// classified: its outcome is per-transaction.
+    /// wallet-rpc `transfer` errors raised before a transaction is relayed (wallet_rpc_server_error_codes.h, identical in
+    /// Monero and Zephyr v2.3.0 — verified 2026-11-01): WRONG_ADDRESS (-2), WRONG_PAYMENT_ID (-5), TX_NOT_POSSIBLE (-16),
+    /// NOT_ENOUGH_MONEY (-17), ZERO_DESTINATION (-20), NOT_ENOUGH_UNLOCKED_MONEY (-37) — all thrown by validation or by
+    /// create_transactions_2 before anything reaches the daemon. GENERIC_TRANSFER_ERROR (-4: also "rejected by daemon"
+    /// after a relay attempt), DAEMON_IS_BUSY (-3), TX_TOO_LARGE (-18: handled by the transfer_split retry, otherwise a
+    /// human looks), NO_DAEMON_CONNECTION (-38: the transaction may still be in the daemon), UNKNOWN_ERROR (-1) and -500
+    /// (RpcClient timeout) stay unresolved. transfer_split is never classified: its outcome is per-transaction.
     /// </summary>
     internal static bool IsNotSentCode(int rpcErrorCode)
     {
-        return rpcErrorCode is -2 or -5 or -16 or -17 or -20;
+        return rpcErrorCode is -2 or -5 or -16 or -17 or -20 or -37;
     }
 
     private static bool IsTooLargeError(string message)
@@ -406,10 +408,11 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
         // send command
         var transferResponse = await rpcClientWallet.ExecuteAsync<TransferResponse>(logger, CryptonoteWalletCommands.Transfer, ct, request);
 
-        // gracefully handle error -4 (transaction would be too large. try /transfer_split)
+        // gracefully handle "transaction would be too large" (try /transfer_split)
         // hashlak: -4 is the wallet's GENERIC transfer error; only retry when the message really says the tx is too big,
-        // otherwise a second send would follow an error whose transaction may already have been relayed
-        if(transferResponse.Error?.Code == -4 && IsTooLargeError(transferResponse.Error.Message))
+        // otherwise a second send would follow an error whose transaction may already have been relayed. Current wallets
+        // (Monero ≥ 0.13, Zephyr) report it as TX_TOO_LARGE (-18), raised by create_transactions_2 before any relay.
+        if(transferResponse.Error?.Code is -4 or -18 && IsTooLargeError(transferResponse.Error.Message))
         {
             if(walletSupportsTransferSplit)
             {
