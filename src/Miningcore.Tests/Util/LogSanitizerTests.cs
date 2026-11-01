@@ -21,8 +21,16 @@ public class LogSanitizerTests
         Assert.Equal("rig1", LogSanitizer.WorkerName("rig1"));
         Assert.Equal("gpu_02-b", LogSanitizer.WorkerName("gpu_02-b"));
         Assert.Equal(string.Empty, LogSanitizer.WorkerName(""));
-        Assert.Equal(string.Empty, LogSanitizer.WorkerName("a b"));
-        Assert.Equal(string.Empty, LogSanitizer.WorkerName("<script>"));
-        Assert.Equal(string.Empty, LogSanitizer.WorkerName(new string('w', 33)));
+        Assert.Equal(string.Empty, LogSanitizer.WorkerName(null));
+
+        // anything else becomes a stable w-<8 hex>: no raw text, rigs still distinguishable
+        foreach(var raw in new[] { "a b", "<script>", new string('w', 33), "rig1\n", "جهاز-1" })
+        {
+            var mapped = LogSanitizer.WorkerName(raw);
+            Assert.Matches("^w-[0-9a-f]{8}$", mapped);
+            Assert.Equal(mapped, LogSanitizer.WorkerName(raw));
+        }
+
+        Assert.NotEqual(LogSanitizer.WorkerName("a b"), LogSanitizer.WorkerName("a  b"));
     }
 }

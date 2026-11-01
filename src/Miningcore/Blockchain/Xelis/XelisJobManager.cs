@@ -380,11 +380,33 @@ public class XelisJobManager : JobManagerBase<XelisJob>
             address.Skip(4).All(c => "qpzry9x8gf2tvdw0s3jn54khce6mua7l".Contains(c));
     }
 
-    /// <summary>Cheap pre-check before any RPC: xel:/xet:, letters, digits and one colon, sane length.</summary>
+    /// <summary>Cheap pre-check before any RPC: xel:/xet: prefix, letters, digits and one colon, sane length.</summary>
     public static bool LooksLikeAddress(string address)
     {
         return !string.IsNullOrEmpty(address) && address.Length >= 20 && address.Length <= 128 &&
+            (address.StartsWith("xel:", StringComparison.Ordinal) || address.StartsWith("xet:", StringComparison.Ordinal)) &&
             address.Count(c => c == ':') == 1 && address.All(c => char.IsAsciiLetterOrDigit(c) || c == ':');
+    }
+
+    /// <summary>"xel:" on mainnet, "xet:" on every other network (the daemon's get_info.network); null while unknown.</summary>
+    public static string AddressPrefixFor(string network)
+    {
+        if(string.IsNullOrEmpty(network))
+            return null;
+
+        return string.Equals(network, "mainnet", StringComparison.OrdinalIgnoreCase) ? "xel:" : "xet:";
+    }
+
+    /// <summary>
+    /// The address belongs to the daemon's network (security review 2026-11-01, S2): the daemon's validate_address
+    /// does not say so, and a wrong-network payee would fail its page at build_transaction and trip the breaker.
+    /// Unknown network = no verdict (true).
+    /// </summary>
+    public static bool IsForNetwork(string address, string network)
+    {
+        var prefix = AddressPrefixFor(network);
+
+        return prefix == null || (address != null && address.StartsWith(prefix, StringComparison.Ordinal));
     }
 
     public async Task<AddressValidation> ValidateAddressDetailedAsync(string address, CancellationToken ct)
@@ -404,7 +426,8 @@ public class XelisJobManager : JobManagerBase<XelisJob>
 
             // the daemon answers a malformed address with a JSON-RPC error, not with is_valid=false: only a transport
             // error (-500) or an empty answer means "no verdict" (security review 2026-11-01, N1)
-            if(response.Error?.Code == -500 || (response.Error == null && response.Response == null))
+            // -32601 (method not found after a daemon upgrade) is a daemon problem too, never a ban of every miner
+            if(response.Error?.Code is -500 or -32601 || (response.Error == null && response.Response == null))
             {
                 logger.Warn(() => $"validate_address did not answer: {response.Error?.Message ?? "no response"} (Code {response.Error?.Code})");
                 return AddressValidation.DaemonError;

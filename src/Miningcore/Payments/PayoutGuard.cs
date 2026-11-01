@@ -298,6 +298,8 @@ public class PayoutGuard : IPayoutGuard
     private readonly IBalanceRepository balanceRepo;
     private readonly IMessageBus messageBus;
     private readonly ConcurrentDictionary<string, DateTime> lastSkipLog = new();
+    private readonly ConcurrentDictionary<string, int> lockMisses = new();
+    private const int LockMissesBeforeWarning = 3;   // three 10-minute ticks
 
     private sealed class BalanceChangedException : Exception
     {
@@ -379,12 +381,34 @@ public class PayoutGuard : IPayoutGuard
         // the pool's advisory payout lock lives on its own connection from here until finalize: a second process, or
         // the operator script, that cannot take it knows a run is in flight and leaves its rows alone
         var lockCon = await cf.OpenConnectionAsync();
+        bool locked;
 
-        if(!await repo.TryLockPoolAsync(lockCon, poolId))
+        try
+        {
+            locked = await repo.TryLockPoolAsync(lockCon, poolId);
+        }
+
+        catch
         {
             lockCon.Dispose();
+            throw;
+        }
+
+        if(!locked)
+        {
+            lockCon.Dispose();
+
+            // a lock nobody releases (a second Miningcore, a stuck psql session, a hung send in another process) would
+            // otherwise only ever be an Info line: after a few ticks the owner is told (security review 2026-11-01, S6)
+            var misses = lockMisses.AddOrUpdate(poolId, 1, (_, n) => n + 1);
+
+            if(misses >= LockMissesBeforeWarning && ShouldLog("lockmiss:" + poolId))
+                Warn(poolId, $"payout lock held by another session for {misses} ticks — nothing is paid or marked: check payout-guard.sh status (sending) and pg_stat_activity");
+
             return Skip(poolId, "another payout process holds this pool's lock");
         }
+
+        lockMisses.TryRemove(poolId, out _);
 
         try
         {
@@ -665,7 +689,7 @@ public class PayoutGuard : IPayoutGuard
 
         try
         {
-            await MarkOpenRunsAsync(poolId, where, r => reason = r);
+            await MarkOpenRunsAsync(poolId, where, quiet, r => reason = r);
         }
 
         finally
@@ -688,7 +712,7 @@ public class PayoutGuard : IPayoutGuard
         return reason != null;
     }
 
-    private async Task MarkOpenRunsAsync(string poolId, string where, Action<string> setReason)
+    private async Task MarkOpenRunsAsync(string poolId, string where, bool quiet, Action<string> setReason)
     {
         await cf.RunTx(async (con, tx) =>
         {
@@ -698,8 +722,15 @@ public class PayoutGuard : IPayoutGuard
             if(open.Length == 0)
                 return;
 
-            foreach(var run in open.Where(x => x.Status == PayoutRunStatus.Reserved))
+            var stale = open.Where(x => x.Status == PayoutRunStatus.Reserved).ToArray();
+
+            foreach(var run in stale)
                 await repo.MarkRunUnresolvedAsync(con, tx, run.RunId, $"left open — {where}");
+
+            // on a pool that is already tripped only a newly marked run is news: an unresolved run waiting for the
+            // operator is neither re-tripped nor logged every tick
+            if(quiet && stale.Length == 0)
+                return;
 
             var reason = $"open run {open[0].RunId} ({open[0].Status}) from {open[0].Created:u} {where} — payout-guard.sh resolve";
             await repo.TripAsync(con, tx, poolId, reason);
@@ -712,6 +743,13 @@ public class PayoutGuard : IPayoutGuard
         await cf.RunTx((con, tx) => repo.TripAsync(con, tx, poolId, reason));
 
         Notify(poolId, reason);
+    }
+
+    private void Warn(string poolId, string reason)
+    {
+        logger.Warn(() => $"[{poolId}] PAYOUT GUARD WARNING: {reason}");
+
+        messageBus.SendMessage(new AdminNotification("Payout guard warning", $"[{poolId}] {reason}"));
     }
 
     private void Notify(string poolId, string reason)

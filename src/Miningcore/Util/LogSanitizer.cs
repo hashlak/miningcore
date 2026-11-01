@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Miningcore.Util;
@@ -9,7 +11,8 @@ namespace Miningcore.Util;
 /// </summary>
 public static class LogSanitizer
 {
-    private static readonly Regex workerName = new("^[A-Za-z0-9_-]{1,32}$", RegexOptions.Compiled);
+    // \z, not $: in .NET "$" also matches before a final newline, so "rig1\n" would pass unchanged (security review 2026-11-01, S5)
+    private static readonly Regex workerName = new(@"^[A-Za-z0-9_-]{1,32}\z", RegexOptions.Compiled);
 
     /// <summary>Printable ASCII letters, digits and . : _ - only, at most <paramref name="max"/> characters, "…" when cut.</summary>
     public static string Name(string value, int max = 80)
@@ -22,9 +25,19 @@ public static class LogSanitizer
         return chars.Length > max ? new string(chars, 0, max) + "…" : new string(chars);
     }
 
-    /// <summary>A worker name is 1–32 of [A-Za-z0-9_-]; anything else becomes empty (the share is still credited to the address).</summary>
+    /// <summary>
+    /// A worker name is 1–32 of [A-Za-z0-9_-] and is kept verbatim. Any other non-empty name (Arabic, spaces, longer)
+    /// becomes a stable "w-" + 8 hex of its SHA-1 so that rigs stay distinguishable (per-rig offline alerts, stats)
+    /// without carrying the raw text anywhere. Empty stays empty (the share is credited to the address).
+    /// </summary>
     public static string WorkerName(string value)
     {
-        return !string.IsNullOrEmpty(value) && workerName.IsMatch(value) ? value : string.Empty;
+        if(string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        if(workerName.IsMatch(value))
+            return value;
+
+        return "w-" + Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(value)), 0, 4).ToLowerInvariant();
     }
 }

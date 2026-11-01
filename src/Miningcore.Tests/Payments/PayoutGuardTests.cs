@@ -284,6 +284,66 @@ public class PayoutGuardTests
     }
 
     [Fact]
+    public async Task Prepare_Releases_The_Lock_On_A_Changed_Balance()
+    {
+        repo.GetBalanceForUpdateAsync(con, tx, "p", "b").Returns(Task.FromResult<decimal?>(1m));
+
+        Assert.IsType<PayoutGuardDecision.Skip>(await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None));
+
+        await repo.Received(2).UnlockPoolAsync(con, "p");   // the open-run check, then the reservation lock
+    }
+
+    [Fact]
+    public async Task Prepare_Releases_The_Lock_When_The_Reservation_Throws()
+    {
+        repo.InsertRunAsync(con, tx, Arg.Any<PayoutRun>(), Arg.Any<PayoutRunItem[]>()).Returns(Task.FromException(new InvalidOperationException("db down")));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None));
+
+        await repo.Received(2).UnlockPoolAsync(con, "p");   // the open-run check, then the reservation lock
+    }
+
+    [Fact]
+    public async Task Finalize_Releases_The_Lock_Even_When_It_Throws()
+    {
+        var reserved = Assert.IsType<PayoutGuardDecision.Run>(await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None));
+        await repo.Received(1).UnlockPoolAsync(con, "p");   // only the open-run check: the reservation lock is held across the send
+        Assert.NotNull(reserved.Context.LockConnection);
+
+        repo.GetItemsForUpdateAsync(con, tx, reserved.Context.RunId).Returns(Task.FromException<PayoutRunItem[]>(new InvalidOperationException("db down")));
+
+        try
+        {
+            await guard.FinalizeRunAsync(reserved.Context, null, CancellationToken.None);
+        }
+        catch(InvalidOperationException)
+        {
+            // finalize may surface the failure; the lock must be gone either way
+        }
+
+        await repo.Received(2).UnlockPoolAsync(con, "p");
+        Assert.Null(reserved.Context.LockConnection);
+    }
+
+    [Fact]
+    public async Task Lock_Held_For_Three_Ticks_Warns_The_Owner_Once()
+    {
+        repo.TryLockPoolAsync(con, "p").Returns(Task.FromResult(false));
+
+        for(var i = 0; i < 2; i++)
+            Assert.IsType<PayoutGuardDecision.Skip>(await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None));
+
+        bus.DidNotReceive().SendMessage(Arg.Any<AdminNotification>());
+
+        for(var i = 0; i < 3; i++)
+            Assert.IsType<PayoutGuardDecision.Skip>(await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None));
+
+        bus.Received(1).SendMessage(Arg.Any<AdminNotification>());   // once per hour, not once per tick
+        await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
+        await repo.DidNotReceive().UnlockPoolAsync(con, "p");       // never taken, never released
+    }
+
+    [Fact]
     public async Task Finalize_All_Confirmed_Is_Paid()
     {
         var ctx = new PayoutRunContext(Guid.NewGuid(), "p", new[] { B("a", 5) }, repo);

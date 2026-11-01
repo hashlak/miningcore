@@ -91,7 +91,7 @@ public class ProgpowPool : PoolBase
 
         // setup worker context
         context.IsSubscribed = true;
-        context.UserAgent = requestParams.FirstOrDefault()?.Trim();
+        context.UserAgent = LogSanitizer.Name(requestParams.FirstOrDefault());   // logged and stored (shares.useragent)
 
         // Nicehash support
         var nicehashDiff = await GetNicehashStaticMinDiff(context, coin.Name, coin.GetAlgorithmName());

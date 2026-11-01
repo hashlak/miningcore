@@ -819,6 +819,8 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
             .OrderByDescending(x => x.Amount)
             .ToArray();
 
+        var simplePageFailed = false;
+
         if(simpleBalances.Length > 0)
 #if false
                 await PayoutBatch(simpleBalances);
@@ -841,6 +843,7 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
                 {
                     // hashlak payout guard: the pages that were never attempted are certainly not paid
                     NotifyPayoutNotSent(simpleBalances.Skip((i + 1) * pageSize).ToArray(), "previous batch failed");
+                    simplePageFailed = true;
                     break;
                 }
             }
@@ -857,12 +860,21 @@ public class CryptonotePayoutHandler : PayoutHandlerBase,
 
         NotifyPayoutNotSent(paymentIdCandidates.Except(paymentIdBalances).ToArray(), "below minimumPaymentToPaymentId");
 
-        for(var i = 0; i < paymentIdBalances.Length; i++)
+        if(simplePageFailed)
         {
-            if(!await PayoutToPaymentId(paymentIdBalances[i], ct))
+            // the wallet is in an unknown state after a failed page (security review 2026-11-01): nothing more is sent this run
+            NotifyPayoutNotSent(paymentIdBalances, "previous batch failed");
+        }
+
+        else
+        {
+            for(var i = 0; i < paymentIdBalances.Length; i++)
             {
-                NotifyPayoutNotSent(paymentIdBalances.Skip(i + 1).ToArray(), "previous transfer failed");
-                break;
+                if(!await PayoutToPaymentId(paymentIdBalances[i], ct))
+                {
+                    NotifyPayoutNotSent(paymentIdBalances.Skip(i + 1).ToArray(), "previous transfer failed");
+                    break;
+                }
             }
         }
 

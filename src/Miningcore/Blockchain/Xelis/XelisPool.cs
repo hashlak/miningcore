@@ -59,7 +59,7 @@ public class XelisPool : PoolBase
         if(requestParams?.Length < 1)
             throw new StratumException(StratumError.Other, "invalid params");
 
-        context.UserAgent = requestParams.FirstOrDefault()?.ToString().Trim();
+        context.UserAgent = LogSanitizer.Name(requestParams.FirstOrDefault()?.ToString());   // logged and stored (shares.useragent)
 
         var subscriberData = manager.GetSubscriberData(connection);
         var data = new object[]
@@ -101,6 +101,23 @@ public class XelisPool : PoolBase
         }
     }
     
+    /// <summary>hashlak: refuse a login with an actionable message; ban when it is junk or a wrong network, not when it is a plain miner mistake.</summary>
+    private async Task RefuseLoginAsync(StratumConnection connection, JsonRpcRequest request, string minerName, string why, bool ban)
+    {
+        await connection.RespondErrorAsync(StratumError.UnauthorizedWorker, $"Authorization failed: {why}", request.Id, false);
+
+        if(ban && clusterConfig?.Banning?.BanOnLoginFailure is null or true)
+        {
+            logger.Info(() => $"[{connection.ConnectionId}] Banning unauthorized worker {LogSanitizer.Name(minerName)} for {loginFailureBanTimeout.TotalSeconds} sec ({why})");
+            banManager.Ban(connection.RemoteEndpoint.Address, loginFailureBanTimeout);
+        }
+
+        else
+            logger.Info(() => $"[{connection.ConnectionId}] Refused login {LogSanitizer.Name(minerName)}: {why}");
+
+        Disconnect(connection);
+    }
+
     protected virtual async Task OnAuthorizeAsync(StratumConnection connection, Timestamped<JsonRpcRequest> tsRequest, CancellationToken ct)
     {
         var request = tsRequest.Value;
@@ -127,27 +144,29 @@ public class XelisPool : PoolBase
         var minerName = split?.FirstOrDefault()?.Trim();
         workerName = split?.Skip(1).FirstOrDefault()?.Trim() ?? workerName;
 
-        // hashlak (security review 2026-11-01, N2): the cheap pre-check and the one-address rule come BEFORE any RPC, and a
-        // plain xel:/xet: address never needs split_address — only an integrated address does. Junk and repeated
-        // authorizes on one connection therefore cost the daemon nothing.
+        // hashlak (security review 2026-11-01, N2/S1/S2/S3): everything below up to the one-address rule costs the daemon
+        // nothing — junk and repeated authorizes on one connection never reach an RPC.
+        // 1. shape: xel:/xet: + letters/digits, one colon, sane length
         if(!XelisJobManager.LooksLikeAddress(minerName))
         {
-            await connection.RespondErrorAsync(StratumError.UnauthorizedWorker, "Authorization failed", request.Id, false);
-
-            if(clusterConfig?.Banning?.BanOnLoginFailure is null or true)
-            {
-                logger.Info(() => $"[{connection.ConnectionId}] Banning unauthorized worker {LogSanitizer.Name(minerName)} for {loginFailureBanTimeout.TotalSeconds} sec (not an address)");
-                banManager.Ban(connection.RemoteEndpoint.Address, loginFailureBanTimeout);
-                Disconnect(connection);
-            }
-
+            await RefuseLoginAsync(connection, request, minerName, "not an address", ban: true);
             return;
         }
 
-        // an integrated address is reduced to its base address (the pool pays the base address); a plain one is used as is,
-        // so the common case costs no RPC at all
+        // 2. network: the daemon's validate_address does not check it; a wrong-network payee would trip the breaker at payout
+        if(!XelisJobManager.IsForNetwork(minerName, manager.Network))
+        {
+            await RefuseLoginAsync(connection, request, minerName, $"address is for another network (this pool expects {XelisJobManager.AddressPrefixFor(manager.Network)}…)", ban: true);
+            return;
+        }
+
+        // 3. integrated addresses are refused: the pool keys balances by the base address, so the integrated data (an
+        //    exchange's deposit memo) would be dropped at payout and the funds could be lost — plain addresses only
         if(!XelisJobManager.IsPlainAddress(minerName))
-            minerName = await manager.NormalizeAddressAsync(minerName, ct);
+        {
+            await RefuseLoginAsync(connection, request, minerName, "integrated addresses are not supported, use your plain wallet address", ban: false);
+            return;
+        }
 
         if(context.IsAuthorized && !string.IsNullOrEmpty(context.Miner))
         {
@@ -173,7 +192,7 @@ public class XelisPool : PoolBase
 
         context.IsAuthorized = validation == AddressValidation.Valid;
         context.Miner = minerName;
-        context.Worker = LogSanitizer.WorkerName(workerName);   // hashlak: 1-32 of [A-Za-z0-9_-], else empty
+        context.Worker = LogSanitizer.WorkerName(workerName?.Trim());   // hashlak: 1-32 of [A-Za-z0-9_-] verbatim, else w-<hash>
 
         if(context.IsAuthorized)
         {

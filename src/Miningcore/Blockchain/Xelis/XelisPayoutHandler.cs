@@ -273,6 +273,14 @@ public class XelisPayoutHandler : PayoutHandlerBase,
 
         foreach(var balance in balances.Where(x => x.Amount > 0))
         {
+            // wrong network or integrated (security review 2026-11-01, S2/S3): never sent, never trips the pool for everyone
+            if(!XelisJobManager.IsPlainAddress(balance.Address) || !XelisJobManager.IsForNetwork(balance.Address, network))
+            {
+                logger.Error(() => $"[{LogCategory}] Holding back payout of {FormatAmount(balance.Amount)} to {balance.Address}: not a plain address of this network");
+                NotifyPayoutNotSent(new[] { balance }, "not a plain address of this network");
+                continue;
+            }
+
             var validateAddressRequest = new ValidateAddressRequest
             {
                 Address = balance.Address
