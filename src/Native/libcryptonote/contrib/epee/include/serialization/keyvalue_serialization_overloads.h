@@ -25,6 +25,7 @@
 // 
 
 #pragma once
+#include <cstdint>   // GCC 13: uint64_t & co. are no longer pulled in transitively
 
 #include <set>
 #include <list>

@@ -26,6 +26,7 @@
 // 
 
 #pragma once
+#include <cstdint>   // GCC 13: uint64_t & co. are no longer pulled in transitively
 
 #include <boost/mpl/vector.hpp>
 #include <boost/mpl/contains.hpp>

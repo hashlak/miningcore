@@ -5,6 +5,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #pragma once 
+#include <cstdint>   // GCC 13: uint64_t & co. are no longer pulled in transitively
 #include <string>
 namespace currency
 {
