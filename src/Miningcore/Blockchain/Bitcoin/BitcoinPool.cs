@@ -117,8 +117,24 @@ public class BitcoinPool : PoolBase
         var minerName = split?.FirstOrDefault()?.Trim();
         var workerName = split?.Skip(1).FirstOrDefault()?.Trim() ?? string.Empty;
 
-        // assumes that minerName is an address
-        context.IsAuthorized = await manager.ValidateAddressAsync(minerName, ct);
+        // hashlak: one address per connection — a second authorize with another address is refused (cache/RPC abuse)
+        if(context.IsAuthorized && !string.IsNullOrEmpty(context.Miner) && !string.Equals(context.Miner, minerName, StringComparison.Ordinal))
+        {
+            await connection.RespondErrorAsync(StratumError.UnauthorizedWorker, "already authorized with a different address on this connection", request.Id, false);
+            return;
+        }
+
+        // assumes that minerName is an address; a daemon that does not answer is not a verdict: ask the miner to retry, no ban
+        var validation = await manager.ValidateAddressDetailedAsync(minerName, ct);
+
+        if(validation == AddressValidation.DaemonError)
+        {
+            logger.Warn(() => $"[{connection.ConnectionId}] Address check unavailable (daemon did not answer) for {minerName}: retry, no ban");
+            await connection.RespondErrorAsync(StratumError.Other, "address check temporarily unavailable, retry", request.Id, false);
+            return;
+        }
+
+        context.IsAuthorized = validation == AddressValidation.Valid;
         context.Miner = minerName;
         context.Worker = workerName;
 

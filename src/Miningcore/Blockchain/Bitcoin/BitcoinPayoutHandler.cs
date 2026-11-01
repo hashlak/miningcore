@@ -194,6 +194,26 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
     {
         Contract.RequiresNonNull(balances);
 
+        // hashlak: sendmany is all-or-nothing — one address the daemon rejects would block every miner's payout
+        // until someone intervenes by hand. Check each payee with the paying daemon (no cache) and hold the bad ones back.
+        var payable = new List<Balance>();
+
+        foreach(var balance in balances.Where(x => x.Amount > 0))
+        {
+            var check = await rpcClient.ExecuteAsync<ValidateAddressResponse>(logger, BitcoinCommands.ValidateAddress, ct, new[] { balance.Address });
+
+            if(check.Error == null && check.Response is {IsValid: true})
+                payable.Add(balance);
+            else
+            {
+                var reason = check.Error != null ? $"validateaddress failed: {check.Error.Message}" : "address rejected by the daemon";
+                logger.Error(() => $"[{LogCategory}] Holding back payout of {FormatAmount(balance.Amount)} to {balance.Address}: {reason}");
+                NotifyPayoutFailure(poolConfig.Id, new[] { balance }, $"held back: {reason}", null);
+            }
+        }
+
+        balances = payable.ToArray();
+
         // build args
         var amounts = balances
             .Where(x => x.Amount > 0)

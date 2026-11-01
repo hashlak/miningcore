@@ -613,14 +613,36 @@ public abstract class BitcoinJobManagerBase<TJob> : JobManagerBase<TJob>
         base.Configure(pc, cc);
     }
 
+    // hashlak: one bounded cache per pool (never static: every KawPow coin shares this base class in one process)
+    protected readonly ValidatedAddressCache validatedAddresses = new();
+
     public virtual async Task<bool> ValidateAddressAsync(string address, CancellationToken ct)
     {
+        return await ValidateAddressDetailedAsync(address, ct) == AddressValidation.Valid;
+    }
+
+    /// <summary>
+    /// Valid / Invalid as the daemon says, or DaemonError when the daemon did not answer — callers must not treat
+    /// DaemonError as "invalid" (no ban, no cache): under a login burst the RPC queue drops calls (week-6 load test).
+    /// </summary>
+    public virtual async Task<AddressValidation> ValidateAddressDetailedAsync(string address, CancellationToken ct)
+    {
         if(string.IsNullOrEmpty(address))
-            return false;
+            return AddressValidation.Invalid;
+
+        if(validatedAddresses.Contains(address))
+            return AddressValidation.Valid;
 
         var result = await rpc.ExecuteAsync<ValidateAddressResponse>(logger, BitcoinCommands.ValidateAddress, ct, new[] { address });
 
-        return result.Response is {IsValid: true};
+        if(result.Error != null || result.Response == null)
+            return AddressValidation.DaemonError;
+
+        if(!result.Response.IsValid)
+            return AddressValidation.Invalid;
+
+        validatedAddresses.Remember(address);
+        return AddressValidation.Valid;
     }
 
     #endregion // API-Surface
