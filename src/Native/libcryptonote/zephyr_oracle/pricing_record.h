@@ -88,6 +88,7 @@ namespace zephyr_oracle
       uint64_t reserve_ma;
       uint64_t reserve_ratio;
       uint64_t reserve_ratio_ma;
+      uint64_t yield_price; // HF_VERSION_V6+ (Zephyr v2.3.0 src/oracle/pricing_record.h); 144 bytes on the wire
       uint64_t timestamp;
       unsigned char signature[64];
 
@@ -136,6 +137,9 @@ namespace zephyr_oracle
       pr.stable_ma = 0;
       pr.reserve = 0;
       pr.reserve_ma = 0;
+      pr.reserve_ratio = 0;
+      pr.reserve_ratio_ma = 0;
+      pr.yield_price = 0;
       pr.timestamp = 0;
       std::memset(pr.signature, 0, sizeof(zephyr_oracle::pricing_record::signature));
       return true;
@@ -173,6 +177,7 @@ namespace zephyr_oracle
       pr.reserve_ma = reserve_ma;
       pr.reserve_ratio = 0;
       pr.reserve_ratio_ma = 0;
+      pr.yield_price = 0;
       pr.timestamp = timestamp;
       std::memcpy(pr.signature, signature, sizeof(pr.signature));
       return true;
@@ -186,6 +191,54 @@ namespace zephyr_oracle
       stable_ma = pr.stable_ma;
       reserve = pr.reserve;
       reserve_ma = pr.reserve_ma;
+      timestamp = pr.timestamp;
+      std::memcpy(signature, pr.signature, sizeof(signature));
+      return true;
+    };
+  };
+
+  // HF_VERSION_PR_UPDATE (4) .. HF_VERSION_V5 (5): the record before yield_price, 136 bytes on the wire
+  class pricing_record_v3
+  {
+
+  public:
+    uint64_t spot;
+    uint64_t moving_average;
+    uint64_t stable;
+    uint64_t stable_ma;
+    uint64_t reserve;
+    uint64_t reserve_ma;
+    uint64_t reserve_ratio;
+    uint64_t reserve_ratio_ma;
+    uint64_t timestamp;
+    unsigned char signature[64];
+
+    bool write_to_pr(zephyr_oracle::pricing_record &pr)
+    {
+      pr.spot = spot;
+      pr.moving_average = moving_average;
+      pr.stable = stable;
+      pr.stable_ma = stable_ma;
+      pr.reserve = reserve;
+      pr.reserve_ma = reserve_ma;
+      pr.reserve_ratio = reserve_ratio;
+      pr.reserve_ratio_ma = reserve_ratio_ma;
+      pr.yield_price = 0;
+      pr.timestamp = timestamp;
+      std::memcpy(pr.signature, signature, sizeof(pr.signature));
+      return true;
+    };
+
+    bool read_from_pr(zephyr_oracle::pricing_record &pr)
+    {
+      spot = pr.spot;
+      moving_average = pr.moving_average;
+      stable = pr.stable;
+      stable_ma = pr.stable_ma;
+      reserve = pr.reserve;
+      reserve_ma = pr.reserve_ma;
+      reserve_ratio = pr.reserve_ratio;
+      reserve_ratio_ma = pr.reserve_ratio_ma;
       timestamp = pr.timestamp;
       std::memcpy(signature, pr.signature, sizeof(signature));
       return true;
