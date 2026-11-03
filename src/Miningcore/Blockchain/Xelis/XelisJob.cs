@@ -28,7 +28,7 @@ public class XelisJob
 
     protected readonly ConcurrentDictionary<string, bool> submissions = new(StringComparer.OrdinalIgnoreCase);
     public byte[] blockTargetBytes { get; protected set; }
-    public uint256 blockTargetValue { get; protected set; }
+    public BigInteger blockTargetValue { get; protected set; }   // U256::MAX / difficulty, as the daemon computes it
     protected byte[] prevHashBytes;
     protected byte[] versionBytes;
     protected byte[] heightBytes;
@@ -118,20 +118,19 @@ public class XelisJob
                 break;
         }
 
-        var targetHashCoinbaseBytes = new Target(new BigInteger(hashCoinbaseBytes, true, true));
-        var hashCoinbaseBytesValue = targetHashCoinbaseBytes.ToUInt256();
+        // hashlak: exact 256-bit value of the big-endian hash (NBitcoin's Target keeps only a compact mantissa)
+        var hashCoinbaseBytesValue = new BigInteger(hashCoinbaseBytes, isUnsigned: true, isBigEndian: true);
         //throw new StratumException(StratumError.LowDifficultyShare, $"nonce: {nonce} ||| hashCoinbaseBytes: {hashCoinbaseBytes.ToHexString()} [Reverse: {hashCoinbaseBytes.ToNewReverseArray().ToHexString()}] ||| BigInteger: {targetHashCoinbaseBytes.ToBigInteger()} ||| Target: {hashCoinbaseBytesValue} [isBlockCandidate: {hashCoinbaseBytesValue <= blockTargetValue} - stratum: {new Target(new BigInteger(XelisUtils.DifficultyToTarget(context.Difficulty), true, true)).ToUInt256()} - blockTemplate: {blockTargetValue}] ||| shareDiff: {(double) new BigRational(XelisConstants.Diff1Target, targetHashCoinbaseBytes.ToBigInteger()) * shareMultiplier} [isStratumCandidate: {hashCoinbaseBytesValue <= new Target(new BigInteger(XelisUtils.DifficultyToTarget(context.Difficulty), true, true)).ToUInt256()} - stratum: {context.Difficulty} - blockTemplate: {Difficulty}]");
 
         // calc share-diff
-        var shareDiff = (double) new BigRational(XelisConstants.Diff1Target, targetHashCoinbaseBytes.ToBigInteger()) * shareMultiplier;
+        var shareDiff = (double) new BigRational(XelisConstants.Diff1Target, BigInteger.Max(hashCoinbaseBytesValue, BigInteger.One)) * shareMultiplier;
 
         // diff check
         var stratumDifficulty = context.Difficulty;
         var ratio = shareDiff / stratumDifficulty;
 
         // check if the share meets the much harder block difficulty (block candidate)
-        var isBlockCandidate = hashCoinbaseBytesValue <= blockTargetValue;
-        //var isBlockCandidate = XelisUtils.CheckDiff(hashCoinbaseBytes, blockTargetBytes);
+        var isBlockCandidate = XelisUtils.MeetsTarget(hashCoinbaseBytes, blockTargetValue);
 
         // test if share meets at least workers current difficulty
         if(!isBlockCandidate && ratio < 0.99)
@@ -195,8 +194,8 @@ public class XelisJob
         this.network = network;
 
         Difficulty = BlockTemplate.Difficulty;
+        blockTargetValue = XelisUtils.DifficultyToTargetValue(BlockTemplate.Difficulty);
         blockTargetBytes = XelisUtils.DifficultyToTarget(BlockTemplate.Difficulty);
-        blockTargetValue = new Target(new BigInteger(blockTargetBytes, true, true)).ToUInt256();
 
         PrevHash = prevHash;
         prevHashBytes = PrevHash.HexToByteArray();
