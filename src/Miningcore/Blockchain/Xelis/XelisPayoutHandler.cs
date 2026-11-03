@@ -397,9 +397,10 @@ public class XelisPayoutHandler : PayoutHandlerBase,
                         }).ToArray()
                 };
 
+                // the estimate already covers a payee's account creation; paying exactly it keeps Σ sent + fee <= Σ reserved
                 buildTransactionRequest.Fee = new BuildTransactionFee
                 {
-                    Amount = (ulong) (estimatedTransactionFees * XelisConstants.SmallestUnit)
+                    Fixed = (ulong) (estimatedTransactionFees * XelisConstants.SmallestUnit)
                 };
             }
 

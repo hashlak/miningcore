@@ -15,13 +15,15 @@ public class BuildTransactionTransfer
     public string ExtraData { get; set; }
 }
 
+/// <summary>
+/// xelis_common FeeBuilder (serde snake_case, externally tagged): {"fixed": u64} or {"extra": …}.
+/// hashlak: upstream sent {"value": …} / {"multiplier": …}, the pre-1.2x API that xelis_wallet 1.25 refuses — a fixed fee
+/// never reached the wallet (mainnet 2026-11-03).
+/// </summary>
 public class BuildTransactionFee
 {
-    [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
-    public double? Multiplier { get; set; }
-
-    [JsonProperty("value", NullValueHandling = NullValueHandling.Ignore)]
-    public ulong? Amount { get; set; }
+    [JsonProperty("fixed", NullValueHandling = NullValueHandling.Ignore)]
+    public ulong? Fixed { get; set; }
 }
 
 public class BuildTransactionRequest
