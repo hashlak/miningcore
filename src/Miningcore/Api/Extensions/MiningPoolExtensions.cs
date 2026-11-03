@@ -1,20 +1,34 @@
 using AutoMapper;
 using Miningcore.Api.Responses;
 using Miningcore.Blockchain;
-using Miningcore.Blockchain.Alephium.Configuration;
-using Miningcore.Blockchain.Bitcoin.Configuration;
-using Miningcore.Blockchain.Ergo.Configuration;
-using Miningcore.Blockchain.Handshake.Configuration;
-using Miningcore.Blockchain.Kaspa.Configuration;
-using Miningcore.Blockchain.Warthog.Configuration;
 using Miningcore.Configuration;
-using Miningcore.Extensions;
 using Miningcore.Mining;
 
 namespace Miningcore.Api.Extensions;
 
 public static class MiningPoolExtensions
 {
+    // hashlak: any paymentProcessing key whose name contains one of these is never served by the API
+    private static readonly string[] secretKeyParts = { "password", "passphrase", "privatekey", "secret", "mnemonic", "seed", "apikey", "token" };
+
+    /// <summary>
+    /// Removes every secret-looking key from a pool's paymentProcessing extras, whatever the coin family. Upstream
+    /// stripped walletPassword per family and missed Ravencoin ("progpow"), so /api/pools served its wallet password.
+    /// </summary>
+    internal static void StripSecrets(IDictionary<string, object> extra)
+    {
+        if(extra == null)
+            return;
+
+        foreach(var key in extra.Keys.ToArray())
+        {
+            var name = key.ToLowerInvariant();
+
+            if(secretKeyParts.Any(name.Contains))
+                extra.Remove(key);
+        }
+    }
+
     public static PoolInfo ToPoolInfo(this PoolConfig poolConfig, IMapper mapper, Persistence.Model.PoolStats stats, IMiningPool pool)
     {
         var poolInfo = mapper.Map<PoolInfo>(poolConfig);
@@ -31,32 +45,8 @@ public static class MiningPoolExtensions
         poolInfo.PoolFeePercent = poolConfig.RewardRecipients != null ? (float) poolConfig.RewardRecipients.Sum(x => x.Percentage) : 0;
 
         // strip security critical stuff
-        if(poolInfo.PaymentProcessing.Extra != null)
-        {
-            var extra = poolInfo.PaymentProcessing.Extra;
-            
-            switch(poolInfo.Coin.Family)
-            {
-                case "alephium":
-                    extra.StripValue(nameof(AlephiumPaymentProcessingConfigExtra.WalletPassword));
-                    break;
-                case "bitcoin":
-                    extra.StripValue(nameof(BitcoinPoolPaymentProcessingConfigExtra.WalletPassword));
-                    break;
-                case "ergo":
-                    extra.StripValue(nameof(ErgoPaymentProcessingConfigExtra.WalletPassword));
-                    break;
-                case "handshake":
-                    extra.StripValue(nameof(HandshakePoolPaymentProcessingConfigExtra.WalletPassword));
-                    break;
-                case "kaspa":
-                    extra.StripValue(nameof(KaspaPaymentProcessingConfigExtra.WalletPassword));
-                    break;
-                case "warthog":
-                    extra.StripValue(nameof(WarthogPaymentProcessingConfigExtra.WalletPrivateKey));
-                    break;
-            }
-        }
+        if(poolInfo.PaymentProcessing != null)
+            StripSecrets(poolInfo.PaymentProcessing.Extra);
 
         if(poolInfo.Ports != null)
         {
