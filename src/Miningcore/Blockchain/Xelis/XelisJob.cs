@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Numerics;
 using System.Text;
+using System.Text.RegularExpressions;
 using Miningcore.Blockchain.Xelis.DaemonResponses;
 using Miningcore.Contracts;
 using Miningcore.Crypto;
@@ -13,7 +14,6 @@ using Miningcore.Native;
 using Miningcore.Stratum;
 using Miningcore.Time;
 using Miningcore.Util;
-using NBitcoin;
 
 namespace Miningcore.Blockchain.Xelis;
 
@@ -95,7 +95,35 @@ public class XelisJob
         }
     }
 
-    protected virtual Share ProcessShareInternal(
+    /// <summary>
+    /// hashlak: credited difficulty never exceeds the network difficulty. A static "d=" has no upper bound and a block
+    /// candidate skips the ratio check, so a miner could be credited at any difficulty it picked; capped at the network
+    /// difficulty every share pays exactly its expected work (review 2026-11-03, B2). Also keeps PPLNS scores finite.
+    /// </summary>
+    public static double CreditedDifficulty(double stratumDifficulty, double networkDifficulty)
+    {
+        return Math.Min(stratumDifficulty, networkDifficulty);
+    }
+
+    private static readonly Regex regexNonce = new($"^[0-9a-fA-F]{{{XelisConstants.NonceLength}}}$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// hashlak: a nonce is exactly 16 hex characters, returned lowercase. HexToByteArray maps ANY character to a nibble,
+    /// so "0q1r2s3t4u5v6g7h" and "1a2b3c4d5e6f7081" were the same nonce under two spellings while the duplicate check
+    /// compared the raw strings: one valid share could be credited thousands of times (review 2026-11-03, B1).
+    /// </summary>
+    public static bool TryCanonicalNonce(string nonce, out string canonical)
+    {
+        canonical = null;
+
+        if(string.IsNullOrEmpty(nonce) || !regexNonce.IsMatch(nonce))
+            return false;
+
+        canonical = nonce.ToLowerInvariant();
+        return true;
+    }
+
+    protected virtual (Share Share, string BlockHeaderHex) ProcessShareInternal(
         StratumConnection worker, string nonce)
     {
         var context = worker.ContextAs<XelisWorkerContext>();
@@ -120,7 +148,6 @@ public class XelisJob
 
         // hashlak: exact 256-bit value of the big-endian hash (NBitcoin's Target keeps only a compact mantissa)
         var hashCoinbaseBytesValue = new BigInteger(hashCoinbaseBytes, isUnsigned: true, isBigEndian: true);
-        //throw new StratumException(StratumError.LowDifficultyShare, $"nonce: {nonce} ||| hashCoinbaseBytes: {hashCoinbaseBytes.ToHexString()} [Reverse: {hashCoinbaseBytes.ToNewReverseArray().ToHexString()}] ||| BigInteger: {targetHashCoinbaseBytes.ToBigInteger()} ||| Target: {hashCoinbaseBytesValue} [isBlockCandidate: {hashCoinbaseBytesValue <= blockTargetValue} - stratum: {new Target(new BigInteger(XelisUtils.DifficultyToTarget(context.Difficulty), true, true)).ToUInt256()} - blockTemplate: {blockTargetValue}] ||| shareDiff: {(double) new BigRational(XelisConstants.Diff1Target, targetHashCoinbaseBytes.ToBigInteger()) * shareMultiplier} [isStratumCandidate: {hashCoinbaseBytesValue <= new Target(new BigInteger(XelisUtils.DifficultyToTarget(context.Difficulty), true, true)).ToUInt256()} - stratum: {context.Difficulty} - blockTemplate: {Difficulty}]");
 
         // calc share-diff
         var shareDiff = (double) new BigRational(XelisConstants.Diff1Target, BigInteger.Max(hashCoinbaseBytesValue, BigInteger.One)) * shareMultiplier;
@@ -155,7 +182,7 @@ public class XelisJob
         {
             BlockHeight = (long) BlockHeader.TopoHeight,
             NetworkDifficulty = Difficulty,
-            Difficulty = stratumDifficulty,
+            Difficulty = CreditedDifficulty(stratumDifficulty, Difficulty),
         };
 
         if(isBlockCandidate)
@@ -167,13 +194,12 @@ public class XelisJob
 
             result.BlockHash = blockHashBytes.ToHexString();
 
-            var blockHeaderBytes = SerializeHeader(extranonceBytes, nonceBytes);
-            BlockHeader.Template = blockHeaderBytes.ToHexString();
-
-            return result;
+            // hashlak: the candidate header travels with this share; writing it into the job's shared BlockHeader let two
+            // simultaneous candidates on one job submit each other's header (review 2026-11-03, S2)
+            return (result, SerializeHeader(extranonceBytes, nonceBytes).ToHexString());
         }
 
-        return result;
+        return (result, null);
     }
 
     public virtual void Init(GetBlockHeaderResponse blockHeader, GetBlockTemplateResponse blockTemplate, string jobId, IMasterClock clock, string network, double shareMultiplier, string prevHash)
@@ -192,6 +218,11 @@ public class XelisJob
         this.shareMultiplier = shareMultiplier;
 
         this.network = network;
+
+        // hashlak: a template below difficulty 1 (or NaN) would make every hash a block and every PPLNS score infinite;
+        // UpdateJob logs the exception and keeps the previous job
+        if(!(BlockTemplate.Difficulty >= 1))
+            throw new ArgumentException($"template difficulty {BlockTemplate.Difficulty} is invalid");
 
         Difficulty = BlockTemplate.Difficulty;
         blockTargetValue = XelisUtils.DifficultyToTargetValue(BlockTemplate.Difficulty);
@@ -249,22 +280,20 @@ public class XelisJob
         return submissions.TryAdd(key, true);
     }
 
-    public virtual Share ProcessShare(StratumConnection worker,
+    public virtual (Share Share, string BlockHeaderHex) ProcessShare(StratumConnection worker,
         string nonce)
     {
-        Contract.Requires<ArgumentException>(!string.IsNullOrEmpty(nonce));
+        // validate nonce (a StratumException counts toward the invalid-share ban; an ArgumentException only disconnected)
+        if(!TryCanonicalNonce(nonce, out var canonicalNonce))
+            throw new StratumException(StratumError.Other, "invalid nonce");
 
         var context = worker.ContextAs<XelisWorkerContext>();
 
-        // validate nonce
-        if(nonce.Length != XelisConstants.NonceLength)
-            throw new StratumException(StratumError.Other, "incorrect size of nonce");
-
-        // dupe check
-        if(!RegisterSubmit(context.ExtraNonce1, nonce))
+        // dupe check, on the canonical spelling
+        if(!RegisterSubmit(context.ExtraNonce1, canonicalNonce))
             throw new StratumException(StratumError.DuplicateShare, "duplicate");
 
-        return ProcessShareInternal(worker, nonce);
+        return ProcessShareInternal(worker, canonicalNonce);
     }
 
     #endregion // API-Surface
