@@ -6,22 +6,41 @@ namespace Miningcore.Blockchain.Xelis;
 
 public static class XelisUtils
 {
+    /// <summary>
+    /// Block target exactly as xelis_common::difficulty::compute_difficulty_target: U256::MAX / difficulty
+    /// (integer division; the daemon's difficulty is an integer). Zero for a zero difficulty.
+    /// </summary>
+    public static BigInteger DifficultyToTargetValue(double difficulty)
+    {
+        var diff = new BigInteger(Math.Floor(difficulty));
+
+        return diff.Sign <= 0 ? BigInteger.Zero : XelisConstants.Diff1Target / diff;
+    }
+
+    /// <summary>
+    /// hashlak: the target as 32 big-endian bytes. The upstream version right-aligned BigInteger.ToByteArray(), which is
+    /// little-endian, so every reader that parsed it big-endian got a target driven by its lowest byte: on mainnet
+    /// (2026-11-03) ordinary shares were submitted as blocks ("Invalid difficulty") and some real blocks were never submitted.
+    /// </summary>
     public static byte[] DifficultyToTarget(double difficulty)
     {
-        Span<byte> paddedBytes = stackalloc byte[XelisConstants.TargetPaddingLength];
+        var paddedBytes = new byte[XelisConstants.TargetPaddingLength];
+        var targetBytes = DifficultyToTargetValue(difficulty).ToByteArray(isUnsigned: true, isBigEndian: true);
 
-        if(difficulty == 0.0)
-            return paddedBytes.ToArray();
+        if(targetBytes.Length == 1 && targetBytes[0] == 0)
+            return paddedBytes;
 
-        var targetBigInteger = BigInteger.Multiply(BigInteger.Divide(XelisConstants.Diff1Target, new BigInteger((ulong) (difficulty * 255d))), new BigInteger(255));
-        var targetBytes = targetBigInteger.ToByteArray().AsSpan();
+        targetBytes.CopyTo(paddedBytes, paddedBytes.Length - targetBytes.Length);
 
-        var padLength = paddedBytes.Length - targetBytes.Length;
+        return paddedBytes;
+    }
 
-        if(padLength > 0)
-            targetBytes.CopyTo(paddedBytes[padLength..]);
-
-        return paddedBytes.ToArray();
+    /// <summary>
+    /// xelis_common::difficulty::check_difficulty_against_target: U256::from_big_endian(hash) &lt;= target.
+    /// </summary>
+    public static bool MeetsTarget(ReadOnlySpan<byte> hash, BigInteger target)
+    {
+        return new BigInteger(hash, isUnsigned: true, isBigEndian: true) <= target;
     }
 
     public static long UnixTimeStamp(DateTime date)
@@ -49,6 +68,6 @@ public static class XelisUtils
                 return false;
         }
 
-        return false;
+        return true;    // hash == target meets it (the daemon compares with <=)
     }
 }

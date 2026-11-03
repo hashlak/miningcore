@@ -166,13 +166,13 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         }
     }
 
-    protected async Task<bool> SubmitBlockAsync(Share share, GetBlockHeaderResponse blockHeader, CancellationToken ct)
+    protected async Task<bool> SubmitBlockAsync(Share share, string blockHeaderHex, CancellationToken ct)
     {
-        Contract.RequiresNonNull(blockHeader);
+        Contract.Requires<ArgumentException>(!string.IsNullOrEmpty(blockHeaderHex));
 
         var block = new SubmitBlockRequest
         {
-            BlockTemplate = blockHeader.Template
+            BlockTemplate = blockHeaderHex
         };
 
         var response = await rpc.ExecuteAsync<object>(logger, XelisCommands.SubmitBlock, ct, block);
@@ -277,9 +277,10 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         CancellationToken ct)
     {
         Contract.RequiresNonNull(worker);
-        Contract.RequiresNonNull(submission);
 
-        if(submission is not object[] submitParams)
+        // hashlak: missing params (Contract → ArgumentException) or fewer than 3 (IndexOutOfRange) only disconnected and
+        // never counted toward the ban; a StratumException does — review 2026-11-03, S4
+        if(submission is not object[] submitParams || submitParams.Length < 3)
             throw new StratumException(StratumError.Other, "invalid params");
 
         var context = worker.ContextAs<XelisWorkerContext>();
@@ -287,6 +288,9 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         // extract params
         var jobId = submitParams[1] as string;
         var nonce = submitParams[2] as string;
+
+        if(string.IsNullOrEmpty(jobId))
+            throw new StratumException(StratumError.Other, "invalid params");
 
         XelisJob job;
 
@@ -302,7 +306,7 @@ public class XelisJobManager : JobManagerBase<XelisJob>
             throw new StratumException(StratumError.JobNotFound, "job not found");
 
         // validate & process
-        var share = job.ProcessShare(worker, nonce);
+        var (share, blockHeaderHex) = job.ProcessShare(worker, nonce);
 
         // enrich share with common data
         share.PoolId = poolConfig.Id;
@@ -316,9 +320,9 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         // if block candidate, submit & check if accepted by network
         if(share.IsBlockCandidate)
         {
-            logger.Info(() => $"Submitting block {share.BlockHeight} [{share.BlockHash}][{job.BlockHeader.Template}]");
+            logger.Info(() => $"Submitting block {share.BlockHeight} [{share.BlockHash}][{blockHeaderHex}]");
 
-            var acceptResponse = await SubmitBlockAsync(share, job.BlockHeader, ct);
+            var acceptResponse = await SubmitBlockAsync(share, blockHeaderHex, ct);
 
             // is it still a block candidate?
             share.IsBlockCandidate = acceptResponse;
@@ -329,8 +333,8 @@ public class XelisJobManager : JobManagerBase<XelisJob>
 
                 OnBlockFound();
 
-                // persist the nonce to make block unlocking a bit more reliable
-                share.TransactionConfirmationData = nonce;
+                // persist the nonce to make block unlocking a bit more reliable (validated by ProcessShare; canonical form)
+                share.TransactionConfirmationData = nonce.ToLowerInvariant();
             }
 
             else
