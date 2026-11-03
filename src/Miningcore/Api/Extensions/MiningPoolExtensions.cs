@@ -8,25 +8,17 @@ namespace Miningcore.Api.Extensions;
 
 public static class MiningPoolExtensions
 {
-    // hashlak: any paymentProcessing key whose name contains one of these is never served by the API
-    private static readonly string[] secretKeyParts = { "password", "passphrase", "privatekey", "secret", "mnemonic", "seed", "apikey", "token" };
-
     /// <summary>
-    /// Removes every secret-looking key from a pool's paymentProcessing extras, whatever the coin family. Upstream
-    /// stripped walletPassword per family and missed Ravencoin ("progpow"), so /api/pools served its wallet password.
+    /// hashlak: the API serves no paymentProcessing extras at all. They are operational config — wallet passwords and
+    /// private keys under family-specific names (upstream stripped walletPassword per family and missed Ravencoin,
+    /// "progpow"), `_comment_*` notes — and nothing consumes them (the hashlak site reads the database). Security reviews
+    /// 2026-11-03: a name denylist lets `WalletPass`, `pwd`, `xprv`, … through. AutoMapper copies Extra, so the live
+    /// PoolConfig keeps its walletPassword (PayoutManager re-reads it every cycle).
     /// </summary>
-    internal static void StripSecrets(IDictionary<string, object> extra)
+    internal static void RedactPaymentProcessing(ApiPoolPaymentProcessingConfig paymentProcessing)
     {
-        if(extra == null)
-            return;
-
-        foreach(var key in extra.Keys.ToArray())
-        {
-            var name = key.ToLowerInvariant();
-
-            if(secretKeyParts.Any(name.Contains))
-                extra.Remove(key);
-        }
+        if(paymentProcessing != null)
+            paymentProcessing.Extra = null;
     }
 
     public static PoolInfo ToPoolInfo(this PoolConfig poolConfig, IMapper mapper, Persistence.Model.PoolStats stats, IMiningPool pool)
@@ -45,8 +37,7 @@ public static class MiningPoolExtensions
         poolInfo.PoolFeePercent = poolConfig.RewardRecipients != null ? (float) poolConfig.RewardRecipients.Sum(x => x.Percentage) : 0;
 
         // strip security critical stuff
-        if(poolInfo.PaymentProcessing != null)
-            StripSecrets(poolInfo.PaymentProcessing.Extra);
+        RedactPaymentProcessing(poolInfo.PaymentProcessing);
 
         if(poolInfo.Ports != null)
         {

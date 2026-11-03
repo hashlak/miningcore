@@ -1,35 +1,44 @@
 using System.Collections.Generic;
-using System.Linq;
+using AutoMapper;
 using Miningcore.Api.Extensions;
+using Miningcore.Api.Responses;
+using Miningcore.Configuration;
 using Xunit;
 
 namespace Miningcore.Tests.Api;
 
 public class MiningPoolExtensionsTests
 {
+    private static readonly IMapper mapper = new MapperConfiguration(cfg => cfg.AddProfile(new AutoMapperProfile())).CreateMapper();
+
     [Fact]
-    public void Strips_Every_Secret_Whatever_The_Family()
+    public void Api_Serves_No_Extras_And_The_Live_Config_Keeps_Its_Password()
     {
-        // what the ravencoin pool ("progpow" family) served on /api/pools before the fix, plus the other families' keys
-        var extra = new Dictionary<string, object>
+        // what the ravencoin pool ("progpow" family) carried, plus names a denylist would have missed
+        var source = new PoolPaymentProcessingConfig
         {
-            ["minersPayTxFees"] = true,
-            ["walletPassword"] = "x",
-            ["WalletPrivateKey"] = "x",
-            ["walletPassphrase"] = "x",
-            ["apiKey"] = "x",
-            ["mnemonic"] = "x",
-            ["interval"] = 600,
+            Enabled = true,
+            MinimumPayment = 20,
+            Extra = new Dictionary<string, object>
+            {
+                ["minersPayTxFees"] = true,
+                ["walletPassword"] = "x",
+                ["WalletPass"] = "y",
+                ["xprv"] = "z",
+            },
         };
 
-        MiningPoolExtensions.StripSecrets(extra);
+        var api = mapper.Map<ApiPoolPaymentProcessingConfig>(source);
+        MiningPoolExtensions.RedactPaymentProcessing(api);
 
-        Assert.Equal(new[] { "interval", "minersPayTxFees" }, extra.Keys.OrderBy(x => x).ToArray());
+        Assert.Null(api.Extra);
+        Assert.Equal(20m, api.MinimumPayment);
+        Assert.Equal("x", source.Extra["walletPassword"]);   // PayoutManager re-reads the live config every cycle
     }
 
     [Fact]
-    public void Null_Extras_Are_Fine()
+    public void Null_Is_Fine()
     {
-        MiningPoolExtensions.StripSecrets(null);
+        MiningPoolExtensions.RedactPaymentProcessing(null);
     }
 }
