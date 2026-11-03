@@ -277,9 +277,9 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         CancellationToken ct)
     {
         Contract.RequiresNonNull(worker);
-        Contract.RequiresNonNull(submission);
 
-        // hashlak: fewer than 3 params threw IndexOutOfRange (disconnect, never counted toward the ban) — review 2026-11-03, S4
+        // hashlak: missing params (Contract → ArgumentException) or fewer than 3 (IndexOutOfRange) only disconnected and
+        // never counted toward the ban; a StratumException does — review 2026-11-03, S4
         if(submission is not object[] submitParams || submitParams.Length < 3)
             throw new StratumException(StratumError.Other, "invalid params");
 

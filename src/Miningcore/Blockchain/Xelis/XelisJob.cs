@@ -4,7 +4,6 @@ using System.Globalization;
 using System.Linq;
 using System.Numerics;
 using System.Text;
-using System.Text.RegularExpressions;
 using Miningcore.Blockchain.Xelis.DaemonResponses;
 using Miningcore.Contracts;
 using Miningcore.Crypto;
@@ -102,21 +101,23 @@ public class XelisJob
     /// </summary>
     public static double CreditedDifficulty(double stratumDifficulty, double networkDifficulty)
     {
+        if(double.IsNaN(stratumDifficulty) || stratumDifficulty <= 0)
+            return 0;
+
         return Math.Min(stratumDifficulty, networkDifficulty);
     }
 
-    private static readonly Regex regexNonce = new($"^[0-9a-fA-F]{{{XelisConstants.NonceLength}}}$", RegexOptions.Compiled);
-
     /// <summary>
-    /// hashlak: a nonce is exactly 16 hex characters, returned lowercase. HexToByteArray maps ANY character to a nibble,
-    /// so "0q1r2s3t4u5v6g7h" and "1a2b3c4d5e6f7081" were the same nonce under two spellings while the duplicate check
-    /// compared the raw strings: one valid share could be credited thousands of times (review 2026-11-03, B1).
+    /// hashlak: a nonce is exactly 16 ASCII hex characters, returned lowercase. HexToByteArray maps ANY character to a
+    /// nibble and ignores what follows the 16th, so "0q1r2s3t4u5v6g7h", "1a2b3c4d5e6f7081\n" and "1a2b3c4d5e6f7081" were
+    /// one nonce under several spellings while the duplicate check compared the raw strings: one valid share could be
+    /// credited many times (review 2026-11-03, B1). No regex: .NET's "$" also matches before a final "\n".
     /// </summary>
     public static bool TryCanonicalNonce(string nonce, out string canonical)
     {
         canonical = null;
 
-        if(string.IsNullOrEmpty(nonce) || !regexNonce.IsMatch(nonce))
+        if(nonce == null || nonce.Length != XelisConstants.NonceLength || !nonce.All(char.IsAsciiHexDigit))
             return false;
 
         canonical = nonce.ToLowerInvariant();

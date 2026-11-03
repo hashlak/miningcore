@@ -43,6 +43,31 @@ public class HashingTests : TestBase
         Assert.Equal("69ac67285efd5ca22afc05c4ecee5bda169de4e9ef08fa39d4a6798494cd67a3", hash.ToHexString());
     }
 
+    // Real Xelis mainnet blocks (header version 7, xel/v3), 2026-11-03: the 112-byte PoW challenge rebuilt from
+    // get_block_at_topoheight + the daemon's get_miner_work. Topo 9746049 is hashlak's first mainnet block.
+    // Proves the pool's PoW bytes and block hash match the daemon's (review 2026-11-03, S3).
+    [Theory]
+    [InlineData("ab98e4c7303b37c93d825559959955556c66fa02ed7b6c26b16d5c359d2be281000001a1a1b9f003ea6b0d17de03000034f28c1414ac56c52aa2cfa64d188765896dbcbd800e48189fa62a8117b415c5c6f40ffda6d32055be8252dc24f996b57c5f0d67f98658b8b85931e9b0de2178",
+        206836845, "0000000bb61dd36b5241e8e0f7da9893288286f1218c6c1b6cd110dc3b9da634", "82aa71681db884eda93b46a8e83d02d5e860ad2f51a5e643bd719a61e1b97df4")]
+    [InlineData("a50096c18293712ba76fbf54473461e6b06fe015761eaa47d01e83df83e33adc000001a1a1e6d108156097883119000000000000000000000000000000000000000000000000000000000000000000040c0195854c2687f0463d403f1497602ccefaaef807490077f33a6bff62e4b162",
+        214585955, "0000000908358c4f92e4e37157cffd21a20461dd48577163a48f811014c77ce7", "a76d2f69917ce2f7ab2219a9afc4d9e3c50fc6a6566d8ad17a4a6145e5808454")]
+    [InlineData("f2ee62755708a1c80b6498ddfce268287e9f34c741a94bfa34f5b1f934f7659c000001a1a1cb310a36c82159efabdbaeb31fa12dbf02dde22d9b10b4a0dc6bf0741a902c4c0e8fdfb3afa9aeb08461529ac3242b454bf29b312b38f16201af6b8153be41bcd047a792377fe9a340da4c",
+        254503580, "00000001523bcd65d6d175dcb268f27020d8b71a0d1017e4b04b3ae7a8c0b489", "88b68eacc2f534be17f20a2efffd2f36dda6c397acca122307124945c64d8260")]
+    public void XelisHashV3_Mainnet_Blocks(string challengeHex, double difficulty, string expectedPowHash, string expectedBlockHash)
+    {
+        var challenge = challengeHex.HexToByteArray();
+        Assert.Equal(112, challenge.Length);
+
+        var pow = new byte[32];
+        new XelisHashV3().Digest(challenge, pow);
+        Assert.Equal(expectedPowHash, pow.ToHexString());
+        Assert.True(Miningcore.Blockchain.Xelis.XelisUtils.MeetsTarget(pow, Miningcore.Blockchain.Xelis.XelisUtils.DifficultyToTargetValue(difficulty)));
+
+        var blockHash = new byte[32];
+        new Blake3().Digest(challenge, blockHash);
+        Assert.Equal(expectedBlockHash, blockHash.ToHexString());
+    }
+
     [Fact]
     public void Blake2s_Hash()
     {

@@ -33,6 +33,9 @@ public class XelisShareIntegrityTests
     [InlineData("0x1a2b3c4d5e6f70")]       // prefix
     [InlineData("1a2b3c4d5e6f708 ")]       // whitespace
     [InlineData("1a2b3c4d5e6f708\n")]
+    [InlineData("1a2b3c4d5e6f7081\n")]     // a regex "$" accepts this; it decodes like the 16-char nonce (re-review B1)
+    [InlineData("1a2b3c4d5e6f7081\r\n")]
+    [InlineData("\n1a2b3c4d5e6f708")]
     [InlineData("١a2b3c4d5e6f7081")]       // Arabic-Indic digit one: not ASCII hex
     [InlineData("1a2b3c4d5e6f708g")]
     public void Malformed_Nonces_Are_Rejected(string nonce)
@@ -48,5 +51,8 @@ public class XelisShareIntegrityTests
         Assert.Equal(206836845d, XelisJob.CreditedDifficulty(1e20, 206836845));
         Assert.Equal(500000d, XelisJob.CreditedDifficulty(500000, 206836845));
         Assert.Equal(206836845d, XelisJob.CreditedDifficulty(206836845, 206836845));
+        Assert.Equal(206836845d, XelisJob.CreditedDifficulty(double.PositiveInfinity, 206836845));   // d= with 400 digits
+        Assert.Equal(0d, XelisJob.CreditedDifficulty(double.NaN, 206836845));
+        Assert.Equal(0d, XelisJob.CreditedDifficulty(0, 206836845));
     }
 }
