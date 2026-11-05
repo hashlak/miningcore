@@ -30,6 +30,16 @@ public class ProgpowJob : BitcoinJob
     protected IProgpowCache progpowHasher;
     private new ProgpowJobParams jobParams;
 
+    /// <summary>
+    /// hashlak: one credit per connection and nonce on this job. Keyed by connection rather than extranonce because an
+    /// extranonce repeats after 4,096 connections: two honest rigs sharing one must not refuse each other's shares.
+    /// A connection keeps its extranonce (GetSubscriberData), so it cannot replay under a new one.
+    /// </summary>
+    public bool RegisterSubmit(string connectionId, string canonicalNonce)
+    {
+        return submissions.TryAdd($"{connectionId}:{canonicalNonce}", true);
+    }
+
     protected virtual byte[] SerializeHeader(Span<byte> coinbaseHash)
     {
         // build merkle-root

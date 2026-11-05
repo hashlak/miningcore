@@ -228,8 +228,8 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
 
         var context = worker.ContextAs<ProgpowWorkerContext>();
 
-        // assign unique ExtraNonce1 to worker (miner)
-        context.ExtraNonce1 = extraNonceProvider.Next();
+        // assign unique ExtraNonce1 to worker (miner); hashlak: only once per connection, a second subscribe keeps it
+        context.ExtraNonce1 ??= extraNonceProvider.Next();
 
         // setup response data
         var responseData = new object[]

@@ -88,7 +88,16 @@ public class PPLNSPaymentScheme : IPayoutScheme
 
             if(cutOffCount > 0)
             {
-                await LogDiscardedSharesAsync(ct, poolConfig, block, shareCutOffDate.Value);
+                // hashlak: diagnostics run inside the balance transaction and must never abort it
+                try
+                {
+                    await LogDiscardedSharesAsync(ct, poolConfig, block, shareCutOffDate.Value);
+                }
+
+                catch(Exception ex) when(ex is not OperationCanceledException)
+                {
+                    logger.Warn(() => $"Discarded-shares log failed for pool {poolConfig.Id}, block {block.BlockHeight}: {ex.GetType().Name}");
+                }
 
                 logger.Info(() => $"Deleting {cutOffCount} discarded shares before {shareCutOffDate.Value:O}");
                 await shareRepo.DeleteSharesBeforeAsync(con, tx, poolConfig.Id, shareCutOffDate.Value, ct);

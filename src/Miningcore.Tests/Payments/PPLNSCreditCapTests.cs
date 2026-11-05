@@ -78,9 +78,11 @@ public class PPLNSCreditCapTests
     };
 
     [Theory]
-    [InlineData(1e27)]              // the score fits a decimal: took the whole window, silently
-    [InlineData(1e30)]              // the diagnostics' decimal overflowed: balance update aborted
-    [InlineData(1e35)]              // the score's decimal cast overflowed
+    [InlineData(2000)]              // just above the network: took the whole window, silently
+    [InlineData(1e15)]              // the same
+    [InlineData(1e27)]              // above 1e21 the old diagnostics' FormatQuantity threw: balance update aborted
+    [InlineData(1e30)]              // the same
+    [InlineData(1e35)]              // the old score's decimal cast overflowed
     public async Task Huge_share_is_paid_as_one_block_of_work(double difficulty)
     {
         // default window = 2 blocks of work; newest first: the attacker's share is capped at 1, older honest work gets the rest
@@ -97,6 +99,24 @@ public class PPLNSCreditCapTests
 
         Assert.Equal(75m, credited["honest"]);
         Assert.Equal(25m, credited["attacker"]);
+    }
+
+    [Fact]
+    public async Task A_failing_discard_log_does_not_stop_the_credits()
+    {
+        var calls = 0;
+        shareRepo.ReadSharesBeforeAsync(con, "p", Arg.Any<DateTime>(), Arg.Any<bool>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(_ => calls++ == 0
+                ? Task.FromResult(new[] { S("a", Network), S("b", Network, 1) })
+                : throw new IndexOutOfRangeException());
+        shareRepo.CountSharesBeforeAsync(con, tx, "p", Arg.Any<DateTime>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult(1L));
+
+        var scheme = new PPLNSPaymentScheme(cf, shareRepo, blockRepo, balanceRepo);
+        await scheme.UpdateBalancesAsync(con, tx, pool, handler, new Block { BlockHeight = 1, Created = Now, Miner = "a" }, BlockReward, CancellationToken.None);
+
+        Assert.Equal(2, calls);   // the rewards page, then the discard log
+        Assert.Equal(50m, credited["a"]);
+        Assert.Equal(50m, credited["b"]);
     }
 
     [Fact]

@@ -111,13 +111,7 @@ public class XelisJob
     /// </summary>
     public static bool TryCanonicalNonce(string nonce, out string canonical)
     {
-        canonical = null;
-
-        if(nonce == null || nonce.Length != XelisConstants.NonceLength || !nonce.All(char.IsAsciiHexDigit))
-            return false;
-
-        canonical = nonce.ToLowerInvariant();
-        return true;
+        return NonceFormat.TryCanonicalHex(nonce, XelisConstants.NonceLength, out canonical);
     }
 
     protected virtual (Share Share, string BlockHeaderHex) ProcessShareInternal(
