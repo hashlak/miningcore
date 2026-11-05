@@ -99,6 +99,14 @@ public abstract class PoolBase : StratumServer,
         return null;
     }
 
+    /// <summary>
+    /// hashlak: the static difficulty a connection may use, see <see cref="ShareCredit.StaticDifficulty"/>
+    /// </summary>
+    protected double LimitStaticDiff(StratumConnection connection, double staticDiff)
+    {
+        return ShareCredit.StaticDifficulty(staticDiff, poolConfig.Ports[connection.LocalEndpoint.Port].VarDiff?.MaxDiff);
+    }
+
     protected override void OnConnect(StratumConnection connection, IPEndPoint ipEndPoint)
     {
         // setup context

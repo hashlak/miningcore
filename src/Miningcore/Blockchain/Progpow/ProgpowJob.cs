@@ -7,6 +7,7 @@ using Miningcore.Configuration;
 using Miningcore.Crypto;
 using Miningcore.Crypto.Hashing.Progpow;
 using Miningcore.Extensions;
+using Miningcore.Mining;
 using Miningcore.Stratum;
 using Miningcore.Time;
 using Miningcore.Util;
@@ -116,7 +117,7 @@ public class ProgpowJob : BitcoinJob
         {
             BlockHeight = BlockTemplate.Height,
             NetworkDifficulty = Difficulty,
-            Difficulty = stratumDifficulty / shareMultiplier,
+            Difficulty = ShareCredit.Difficulty(stratumDifficulty / shareMultiplier, Difficulty),
         };
 
         if(!isBlockCandidate)

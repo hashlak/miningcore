@@ -115,9 +115,9 @@ public class CryptonotePool : PoolBase
                    context.VarDiff == null && staticDiff.Value > context.Difficulty))
             {
                 context.VarDiff = null; // disable vardiff
-                context.SetDifficulty(staticDiff.Value);
+                context.SetDifficulty(LimitStaticDiff(connection, staticDiff.Value));
 
-                logger.Info(() => $"[{connection.ConnectionId}] Static difficulty set to {staticDiff.Value}");
+                logger.Info(() => $"[{connection.ConnectionId}] Static difficulty set to {context.Difficulty}");
             }
 
             // respond

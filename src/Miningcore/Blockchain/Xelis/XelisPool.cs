@@ -222,9 +222,9 @@ public class XelisPool : PoolBase
                    context.VarDiff == null && staticDiff.Value > context.Difficulty))
             {
                 context.VarDiff = null; // disable vardiff
-                context.SetDifficulty(staticDiff.Value);
+                context.SetDifficulty(LimitStaticDiff(connection, staticDiff.Value));
 
-                logger.Info(() => $"[{connection.ConnectionId}] Setting static difficulty of {staticDiff.Value}");
+                logger.Info(() => $"[{connection.ConnectionId}] Setting static difficulty of {context.Difficulty}");
             }
 
             var minerJobParams = CreateWorkerJob(connection, context.IsAuthorized);

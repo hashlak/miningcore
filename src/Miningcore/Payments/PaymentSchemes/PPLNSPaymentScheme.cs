@@ -179,7 +179,8 @@ public class PPLNSPaymentScheme : IPayoutScheme
                 var share = page[i];
 
                 var address = share.Miner;
-                var shareDiffAdjusted = payoutHandler.AdjustShareDifficulty(share.Difficulty);
+                // hashlak: capped here too, the diagnostics below convert the sum to decimal
+                var shareDiffAdjusted = ShareCredit.Difficulty(payoutHandler.AdjustShareDifficulty(share.Difficulty), share.NetworkDifficulty);
 
                 // record attributed shares for diagnostic purposes
                 if(!shares.ContainsKey(address))
@@ -187,7 +188,7 @@ public class PPLNSPaymentScheme : IPayoutScheme
                 else
                     shares[address] += shareDiffAdjusted;
 
-                var score = (decimal) (shareDiffAdjusted / share.NetworkDifficulty);
+                var score = ShareCredit.Score(shareDiffAdjusted, share.NetworkDifficulty);
 
                 // if accumulated score would cross threshold, cap it to the remaining value
                 if(accumulatedScore + score >= window)

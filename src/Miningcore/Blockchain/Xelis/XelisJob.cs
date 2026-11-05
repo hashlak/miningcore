@@ -9,6 +9,7 @@ using Miningcore.Contracts;
 using Miningcore.Crypto;
 using Miningcore.Crypto.Hashing.Algorithms;
 using Miningcore.Extensions;
+using Miningcore.Mining;
 using Miningcore.Native;
 using Miningcore.Stratum;
 using Miningcore.Time;
@@ -95,16 +96,11 @@ public class XelisJob
     }
 
     /// <summary>
-    /// hashlak: credited difficulty never exceeds the network difficulty. A static "d=" has no upper bound and a block
-    /// candidate skips the ratio check, so a miner could be credited at any difficulty it picked; capped at the network
-    /// difficulty every share pays exactly its expected work (review 2026-11-03, B2). Also keeps PPLNS scores finite.
+    /// hashlak: review 2026-11-03, B2; the cap now lives in <see cref="ShareCredit"/> for every family we run.
     /// </summary>
     public static double CreditedDifficulty(double stratumDifficulty, double networkDifficulty)
     {
-        if(double.IsNaN(stratumDifficulty) || stratumDifficulty <= 0)
-            return 0;
-
-        return Math.Min(stratumDifficulty, networkDifficulty);
+        return ShareCredit.Difficulty(stratumDifficulty, networkDifficulty);
     }
 
     /// <summary>
