@@ -329,6 +329,46 @@ public abstract class PoolBase : StratumServer,
         }
     }
 
+    /// <summary>hashlak: stale shares in a row (no accepted share between them) after which the connection is closed, without a ban.</summary>
+    public const int MaxStaleSharesBetweenAcceptedShares = 100;
+
+    /// <summary>hashlak: an accepted share ends the current run of stale shares.</summary>
+    protected static void RecordAcceptedShare(WorkerContextBase context)
+    {
+        context.Stats.ValidShares++;
+        context.Stats.StaleShares = 0;
+    }
+
+    /// <summary>
+    /// hashlak: one rejected share. Stale work (<see cref="StaleShareException"/>: job rotated out, block expired) is counted
+    /// and logged on its own and never feeds the ban ratio, because a slow line produces it without any fault of the miner.
+    /// Everything else counts as invalid and can ban.
+    /// </summary>
+    protected void RecordRejectedShare(StratumConnection connection, WorkerContextBase context, StratumException ex)
+    {
+        if(ex is StaleShareException)
+        {
+            context.Stats.StaleShares++;
+            logger.Debug(() => $"[{connection.ConnectionId}] Share stale: {ex.Message} [{context.UserAgent}]");
+
+            // a connection that sends nothing but stale work is closed without a ban: bounds what late work can cost in
+            // log lines and memory (review 2026-11-06); an honest rig mixes stale shares with accepted ones. Exactly
+            // once: submits already buffered behind the close must not log or close again.
+            if(context.Stats.StaleShares == MaxStaleSharesBetweenAcceptedShares)
+            {
+                logger.Info(() => $"[{connection.ConnectionId}] Closing connection: {context.Stats.StaleShares} stale shares without an accepted share [{context.UserAgent}]");
+                Disconnect(connection);
+            }
+
+            return;
+        }
+
+        context.Stats.InvalidShares++;
+        logger.Info(() => $"[{connection.ConnectionId}] Share rejected: {ex.Message} [{context.UserAgent}]");
+
+        ConsiderBan(connection, context, poolConfig.Banning);
+    }
+
     protected void ConsiderBan(StratumConnection connection, WorkerContextBase context, PoolShareBasedBanningConfig config)
     {
         var totalShares = context.Stats.ValidShares + context.Stats.InvalidShares;

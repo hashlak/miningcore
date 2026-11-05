@@ -129,6 +129,7 @@ public class CryptonoteJob
         workerJob.Height = BlockTemplate.Height;
         workerJob.ExtraNonce = (uint) Interlocked.Increment(ref extraNonce);
         workerJob.SeedHash = BlockTemplate.SeedHash;
+        workerJob.PrevHash = PrevHash;
 
         if(extraNonce < 0)
             extraNonce = 0;

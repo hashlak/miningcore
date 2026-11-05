@@ -241,7 +241,7 @@ public class KawpowPoolWireTests : TestBase
         {
             var sw = Stopwatch.StartNew();
 
-            while(sw.ElapsedMilliseconds < ms)
+            while(sw.ElapsedMilliseconds < ms && !Closed)
             {
                 lock(Log)
                 {
@@ -385,6 +385,180 @@ public class KawpowPoolWireTests : TestBase
         Assert.Equal(0, second.Count);
         Assert.Equal(0, rig.BanCalls);
         Assert.False(first.Closed);
+    }
+
+    [Fact]
+    public async Task A_job_the_pool_issued_and_then_rotated_out_is_stale_not_invalid()
+    {
+        using var rig = NewRig();
+        var (miner, extraNonce) = await Miner(rig);
+        var first = miner.Notifies("mining.notify").First();
+        var firstId = (string) first["params"]![0];
+        var firstHeader = (string) first["params"]![1];
+
+        // well past the connection's job queue
+        for(var i = 1; i <= 8; i++)
+        {
+            rig.Manager.Current = rig.NewJob(i);
+            await rig.Pool.Broadcast(rig.Manager.Params());
+        }
+
+        Assert.True(await Until(() => miner.Notifies("mining.notify").Length >= 9));
+
+        var nonce = extraNonce + 1UL.ToString("x12");
+        var mix = Cache.Mix(firstHeader.HexToByteArray(), ulong.Parse(nonce, NumberStyles.HexNumber)).ToHexString();
+
+        for(var i = 0; i < 60; i++)
+        {
+            var response = await miner.Response(await miner.Send("mining.submit", "Rgood.rig1", firstId, "0x" + nonce, "0x" + firstHeader, "0x" + mix));
+
+            Assert.NotNull(response);
+            Assert.Contains("invalid jobid", response!["error"]!.ToString());
+        }
+
+        await Task.Delay(200);
+        Assert.Equal(0, rig.BanCalls);
+        Assert.False(miner.Closed);
+    }
+
+    [Fact]
+    public async Task Duplicate_and_out_of_range_nonces_still_ban()
+    {
+        using var rig = NewRig();
+
+        // the same nonce every time: one accepted share, then duplicates
+        var (dup, extraNonce) = await Miner(rig);
+
+        for(var i = 0; i < 60 && !dup.Closed; i++)
+        {
+            try
+            {
+                await dup.Response(await SubmitValid(dup, extraNonce, 7));
+            }
+
+            catch(IOException)
+            {
+                break;
+            }
+        }
+
+        Assert.True(await Until(() => rig.BanCalls == 1));
+        Assert.True(await Until(() => dup.Closed));
+
+        // nonces that do not start with the connection's own extranonce
+        var (foreign, ownNonce) = await Miner(rig);
+        var otherNonce = ownNonce == "0001" ? "0002" : "0001";
+        var job = foreign.Notifies("mining.notify").Last();
+        var header = (string) job["params"]![1];
+
+        for(var i = 0; i < 60 && !foreign.Closed; i++)
+        {
+            try
+            {
+                var nonce = otherNonce + i.ToString("x12");
+                var mix = Cache.Mix(header.HexToByteArray(), ulong.Parse(nonce, NumberStyles.HexNumber)).ToHexString();
+                await foreign.Response(await foreign.Send("mining.submit", "Rgood.rig1", (string) job["params"]![0], "0x" + nonce, "0x" + header, "0x" + mix));
+            }
+
+            catch(IOException)
+            {
+                break;
+            }
+        }
+
+        Assert.True(await Until(() => rig.BanCalls == 2));
+        Assert.True(await Until(() => foreign.Closed));
+    }
+
+    [Fact]
+    public async Task A_run_of_stale_shares_closes_the_connection_without_a_ban()
+    {
+        using var rig = NewRig();
+        var (late, _) = await Miner(rig);
+        var answered = 0;
+
+        for(var i = 0; i < PoolBase.MaxStaleSharesBetweenAcceptedShares + 20 && !late.Closed; i++)
+        {
+            try
+            {
+                if(await late.Response(await late.Send("mining.submit", "Rgood.rig1", "no-such-job", "0x0", "0x0", "0x0")) != null)
+                    answered++;
+            }
+
+            catch(IOException)
+            {
+                break;
+            }
+        }
+
+        Assert.True(await Until(() => late.Closed));
+        Assert.Equal(0, rig.BanCalls);
+        Assert.InRange(answered, PoolBase.MaxStaleSharesBetweenAcceptedShares - 1, PoolBase.MaxStaleSharesBetweenAcceptedShares + 2);
+    }
+
+    [Fact]
+    public async Task An_accepted_share_ends_the_run_of_stale_shares()
+    {
+        using var rig = NewRig();
+        var (rigOnBadLine, extraNonce) = await Miner(rig);
+
+        // three runs just under the limit, each ended by one accepted share: never closed, never banned
+        for(var round = 1; round <= 3; round++)
+        {
+            for(var i = 0; i < PoolBase.MaxStaleSharesBetweenAcceptedShares - 10; i++)
+                Assert.NotNull(await rigOnBadLine.Response(await rigOnBadLine.Send("mining.submit", "Rgood.rig1", "no-such-job", "0x0", "0x0", "0x0")));
+
+            var accepted = await rigOnBadLine.Response(await SubmitValid(rigOnBadLine, extraNonce, (ulong) round));
+            Assert.True((bool) accepted!["result"]!);
+        }
+
+        await Task.Delay(200);
+        Assert.False(rigOnBadLine.Closed);
+        Assert.Equal(0, rig.BanCalls);
+    }
+
+    [Fact]
+    public async Task Stale_shares_never_ban_but_invalid_shares_still_do()
+    {
+        using var rig = NewRig();
+        var (late, _) = await Miner(rig);
+
+        // well past checkThreshold (50) and 100 % of them rejected: late work for a job the pool no longer has
+        for(var i = 0; i < 60; i++)
+        {
+            var response = await late.Response(await late.Send("mining.submit", "Rgood.rig1", "no-such-job", "0x0", "0x0", "0x0"));
+
+            Assert.NotNull(response);
+            Assert.Contains("invalid jobid", response!["error"]!.ToString());
+        }
+
+        await Task.Delay(200);
+        Assert.Equal(0, rig.BanCalls);
+        Assert.False(late.Closed);
+
+        // the same count of shares that are wrong for the job the pool does have still bans
+        var (bad, extraNonce) = await Miner(rig);
+        var job = bad.Notifies("mining.notify").Last();
+        var header = (string) job["params"]![1];
+
+        // one at a time, as a miner does: 60 unread answers would overflow the connection's send queue (16) and drop the
+        // socket without a ban, which is not what this test is about
+        for(var i = 0; i < 60 && !bad.Closed; i++)
+        {
+            try
+            {
+                await bad.Response(await bad.Send("mining.submit", "Rgood.rig1", (string) job["params"]![0], "0x" + extraNonce + i.ToString("x12"), "0x" + header, "0x" + new string('0', 64)));
+            }
+
+            catch(IOException)
+            {
+                break;
+            }
+        }
+
+        Assert.True(await Until(() => rig.BanCalls == 1));
+        Assert.True(await Until(() => bad.Closed));
+        Assert.False(late.Closed);
     }
 
     [Fact]

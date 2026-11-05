@@ -9,6 +9,7 @@ public class ShareStats
 {
     public int ValidShares { get; set; }
     public int InvalidShares { get; set; }
+    public int StaleShares { get; set; } // hashlak: stale shares since the last accepted share (a run, not a total); never feeds the ban ratio
 }
 
 public class WorkerContextBase

@@ -265,8 +265,16 @@ public class CryptonotePool : PoolBase
                 var jobId = submitRequest?.JobId;
 
                 if((job = context.GetJob(jobId)) == null)
-                    throw new StratumException(StratumError.MinusOne, "invalid jobid");
+                    throw new StaleShareException(StratumError.MinusOne, "invalid jobid");
             }
+
+            // hashlak: stale and malformed work is refused before it can enter the duplicate set, which lives as long as
+            // the worker job and would otherwise grow with every late submit (review 2026-11-06)
+            if(manager.IsStale(job))
+                throw new StaleShareException(StratumError.MinusOne, "block expired");
+
+            if(submitRequest.Nonce == null || !CryptonoteConstants.RegexValidNonce.IsMatch(submitRequest.Nonce))
+                throw new StratumException(StratumError.MinusOne, "malformed nonce");
 
             // dupe check
             if(!job.Submissions.TryAdd(submitRequest.Nonce, true))
@@ -301,7 +309,7 @@ public class CryptonotePool : PoolBase
                 poolStats.LastPoolBlockTime = clock.Now;
 
             // update client stats
-            context.Stats.ValidShares++;
+            RecordAcceptedShare(context);
 
             await UpdateVarDiffAsync(connection, false, ct);
         }
@@ -311,12 +319,8 @@ public class CryptonotePool : PoolBase
             // telemetry
             PublishTelemetry(TelemetryCategory.Share, clock.Now - tsRequest.Timestamp.UtcDateTime, false);
 
-            // update client stats
-            context.Stats.InvalidShares++;
-            logger.Info(() => $"[{connection.ConnectionId}] Share rejected: {ex.Message} [{context.UserAgent}]");
-
-            // banning
-            ConsiderBan(connection, context, poolConfig.Banning);
+            // update client stats and consider a ban; stale work never bans (hashlak)
+            RecordRejectedShare(connection, context, ex);
 
             throw;
         }
