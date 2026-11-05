@@ -352,8 +352,9 @@ public abstract class PoolBase : StratumServer,
             logger.Debug(() => $"[{connection.ConnectionId}] Share stale: {ex.Message} [{context.UserAgent}]");
 
             // a connection that sends nothing but stale work is closed without a ban: bounds what late work can cost in
-            // log lines and memory (review 2026-11-06); an honest rig mixes stale shares with accepted ones
-            if(context.Stats.StaleShares > MaxStaleSharesBetweenAcceptedShares)
+            // log lines and memory (review 2026-11-06); an honest rig mixes stale shares with accepted ones. Exactly
+            // once: submits already buffered behind the close must not log or close again.
+            if(context.Stats.StaleShares == MaxStaleSharesBetweenAcceptedShares)
             {
                 logger.Info(() => $"[{connection.ConnectionId}] Closing connection: {context.Stats.StaleShares} stale shares without an accepted share [{context.UserAgent}]");
                 Disconnect(connection);

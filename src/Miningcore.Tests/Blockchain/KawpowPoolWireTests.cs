@@ -497,6 +497,27 @@ public class KawpowPoolWireTests : TestBase
     }
 
     [Fact]
+    public async Task An_accepted_share_ends_the_run_of_stale_shares()
+    {
+        using var rig = NewRig();
+        var (rigOnBadLine, extraNonce) = await Miner(rig);
+
+        // three runs just under the limit, each ended by one accepted share: never closed, never banned
+        for(var round = 1; round <= 3; round++)
+        {
+            for(var i = 0; i < PoolBase.MaxStaleSharesBetweenAcceptedShares - 10; i++)
+                Assert.NotNull(await rigOnBadLine.Response(await rigOnBadLine.Send("mining.submit", "Rgood.rig1", "no-such-job", "0x0", "0x0", "0x0")));
+
+            var accepted = await rigOnBadLine.Response(await SubmitValid(rigOnBadLine, extraNonce, (ulong) round));
+            Assert.True((bool) accepted!["result"]!);
+        }
+
+        await Task.Delay(200);
+        Assert.False(rigOnBadLine.Closed);
+        Assert.Equal(0, rig.BanCalls);
+    }
+
+    [Fact]
     public async Task Stale_shares_never_ban_but_invalid_shares_still_do()
     {
         using var rig = NewRig();
