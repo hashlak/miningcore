@@ -9,6 +9,7 @@ public class ShareStats
 {
     public int ValidShares { get; set; }
     public int InvalidShares { get; set; }
+    public int StaleShares { get; set; } // hashlak: late for a job that is gone, counted apart from invalid
 }
 
 public class WorkerContextBase

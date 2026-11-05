@@ -307,11 +307,11 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         lock(context)
         {
             if((job = context.GetJob(jobId)) == null)
-                throw new StratumException(StratumError.MinusOne, "invalid jobid");
+                throw new StaleShareException(StratumError.MinusOne, "invalid jobid");
         }
 
         if(job == null)
-            throw new StratumException(StratumError.JobNotFound, "job not found");
+            throw new StaleShareException(StratumError.JobNotFound, "job not found");
 
 
         // validate & process

@@ -428,9 +428,10 @@ public class CryptonoteJobManager : JobManagerBase<CryptonoteJob>
 
         var context = worker.ContextAs<CryptonoteWorkerContext>();
 
+        // hashlak: height alone let a job from before a same-height reorg be validated against the new template (review 2026-11-05)
         var job = currentJob;
-        if(workerJob.Height != job?.BlockTemplate.Height)
-            throw new StratumException(StratumError.MinusOne, "block expired");
+        if(workerJob.Height != job?.BlockTemplate.Height || workerJob.PrevHash != job.PrevHash)
+            throw new StaleShareException(StratumError.MinusOne, "block expired");
 
         // validate & process
         var (share, blobHex) = job.ProcessShare(request.Nonce, workerJob.ExtraNonce, request.Hash, worker);

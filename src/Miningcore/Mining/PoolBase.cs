@@ -329,6 +329,26 @@ public abstract class PoolBase : StratumServer,
         }
     }
 
+    /// <summary>
+    /// hashlak: one rejected share. Stale work (<see cref="StaleShareException"/>: job rotated out, block expired) is counted
+    /// and logged on its own and never feeds the ban ratio, because a slow line produces it without any fault of the miner.
+    /// Everything else counts as invalid and can ban.
+    /// </summary>
+    protected void RecordRejectedShare(StratumConnection connection, WorkerContextBase context, StratumException ex)
+    {
+        if(ex is StaleShareException)
+        {
+            context.Stats.StaleShares++;
+            logger.Info(() => $"[{connection.ConnectionId}] Share stale: {ex.Message} [{context.UserAgent}]");
+            return;
+        }
+
+        context.Stats.InvalidShares++;
+        logger.Info(() => $"[{connection.ConnectionId}] Share rejected: {ex.Message} [{context.UserAgent}]");
+
+        ConsiderBan(connection, context, poolConfig.Banning);
+    }
+
     protected void ConsiderBan(StratumConnection connection, WorkerContextBase context, PoolShareBasedBanningConfig config)
     {
         var totalShares = context.Stats.ValidShares + context.Stats.InvalidShares;

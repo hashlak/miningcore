@@ -15,6 +15,7 @@ public class CryptonoteWorkerJob
     public uint ExtraNonce { get; set; }
     public double Difficulty { get; set; }
     public string SeedHash { get; set; }
+    public string PrevHash { get; set; } // hashlak: the template the job was cut from; a same-height reorg makes it stale
 
     public readonly ConcurrentDictionary<string, bool> Submissions = new(StringComparer.OrdinalIgnoreCase);
 }

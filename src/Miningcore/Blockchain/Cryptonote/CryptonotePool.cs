@@ -265,7 +265,7 @@ public class CryptonotePool : PoolBase
                 var jobId = submitRequest?.JobId;
 
                 if((job = context.GetJob(jobId)) == null)
-                    throw new StratumException(StratumError.MinusOne, "invalid jobid");
+                    throw new StaleShareException(StratumError.MinusOne, "invalid jobid");
             }
 
             // dupe check
@@ -311,12 +311,8 @@ public class CryptonotePool : PoolBase
             // telemetry
             PublishTelemetry(TelemetryCategory.Share, clock.Now - tsRequest.Timestamp.UtcDateTime, false);
 
-            // update client stats
-            context.Stats.InvalidShares++;
-            logger.Info(() => $"[{connection.ConnectionId}] Share rejected: {ex.Message} [{context.UserAgent}]");
-
-            // banning
-            ConsiderBan(connection, context, poolConfig.Banning);
+            // update client stats and consider a ban; stale work never bans (hashlak)
+            RecordRejectedShare(connection, context, ex);
 
             throw;
         }

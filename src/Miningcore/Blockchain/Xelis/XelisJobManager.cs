@@ -303,7 +303,7 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         }
 
         if(job == null)
-            throw new StratumException(StratumError.JobNotFound, "job not found");
+            throw new StaleShareException(StratumError.JobNotFound, "job not found");
 
         // validate & process
         var (share, blockHeaderHex) = job.ProcessShare(worker, nonce);

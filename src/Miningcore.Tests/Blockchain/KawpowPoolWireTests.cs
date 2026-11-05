@@ -241,7 +241,7 @@ public class KawpowPoolWireTests : TestBase
         {
             var sw = Stopwatch.StartNew();
 
-            while(sw.ElapsedMilliseconds < ms)
+            while(sw.ElapsedMilliseconds < ms && !Closed)
             {
                 lock(Log)
                 {
@@ -385,6 +385,50 @@ public class KawpowPoolWireTests : TestBase
         Assert.Equal(0, second.Count);
         Assert.Equal(0, rig.BanCalls);
         Assert.False(first.Closed);
+    }
+
+    [Fact]
+    public async Task Stale_shares_never_ban_but_invalid_shares_still_do()
+    {
+        using var rig = NewRig();
+        var (late, _) = await Miner(rig);
+
+        // well past checkThreshold (50) and 100 % of them rejected: late work for a job the pool no longer has
+        for(var i = 0; i < 60; i++)
+        {
+            var response = await late.Response(await late.Send("mining.submit", "Rgood.rig1", "no-such-job", "0x0", "0x0", "0x0"));
+
+            Assert.NotNull(response);
+            Assert.Contains("invalid jobid", response!["error"]!.ToString());
+        }
+
+        await Task.Delay(200);
+        Assert.Equal(0, rig.BanCalls);
+        Assert.False(late.Closed);
+
+        // the same count of shares that are wrong for the job the pool does have still bans
+        var (bad, extraNonce) = await Miner(rig);
+        var job = bad.Notifies("mining.notify").Last();
+        var header = (string) job["params"]![1];
+
+        // one at a time, as a miner does: 60 unread answers would overflow the connection's send queue (16) and drop the
+        // socket without a ban, which is not what this test is about
+        for(var i = 0; i < 60 && !bad.Closed; i++)
+        {
+            try
+            {
+                await bad.Response(await bad.Send("mining.submit", "Rgood.rig1", (string) job["params"]![0], "0x" + extraNonce + i.ToString("x12"), "0x" + header, "0x" + new string('0', 64)));
+            }
+
+            catch(IOException)
+            {
+                break;
+            }
+        }
+
+        Assert.True(await Until(() => rig.BanCalls == 1));
+        Assert.True(await Until(() => bad.Closed));
+        Assert.False(late.Closed);
     }
 
     [Fact]
