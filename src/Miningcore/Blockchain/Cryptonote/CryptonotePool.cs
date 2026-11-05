@@ -115,9 +115,9 @@ public class CryptonotePool : PoolBase
                    context.VarDiff == null && staticDiff.Value > context.Difficulty))
             {
                 context.VarDiff = null; // disable vardiff
-                context.SetDifficulty(staticDiff.Value);
+                context.SetDifficulty(LimitStaticDiff(connection, staticDiff.Value));
 
-                logger.Info(() => $"[{connection.ConnectionId}] Static difficulty set to {staticDiff.Value}");
+                logger.Info(() => $"[{connection.ConnectionId}] Static difficulty set to {context.Difficulty}");
             }
 
             // respond
@@ -286,10 +286,10 @@ public class CryptonotePool : PoolBase
                 response.Extra["error"] = null;
             }
 
-            await connection.RespondAsync(response);
-
-            // publish
+            // hashlak: publish first, a stalled socket must not lose a share, least of all a block
             messageBus.SendMessage(share);
+
+            await connection.RespondAsync(response);
 
             // telemetry
             PublishTelemetry(TelemetryCategory.Share, clock.Now - tsRequest.Timestamp.UtcDateTime, true);

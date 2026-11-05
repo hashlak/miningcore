@@ -7,6 +7,7 @@ using Miningcore.Configuration;
 using Miningcore.Crypto;
 using Miningcore.Crypto.Hashing.Progpow;
 using Miningcore.Extensions;
+using Miningcore.Mining;
 using Miningcore.Stratum;
 using Miningcore.Time;
 using Miningcore.Util;
@@ -28,6 +29,16 @@ public class ProgpowJob : BitcoinJob
 {
     protected IProgpowCache progpowHasher;
     private new ProgpowJobParams jobParams;
+
+    /// <summary>
+    /// hashlak: one credit per nonce on this job. A nonce starts with the extranonce, and a header depends only on this
+    /// job and the extranonce, so the same nonce is the same work whichever connection or worker job submits it.
+    /// Extranonces are leased (ExtraNonceLeases), so honest rigs do not share one.
+    /// </summary>
+    public bool RegisterSubmit(string canonicalNonce)
+    {
+        return submissions.TryAdd(canonicalNonce, true);
+    }
 
     protected virtual byte[] SerializeHeader(Span<byte> coinbaseHash)
     {
@@ -116,7 +127,7 @@ public class ProgpowJob : BitcoinJob
         {
             BlockHeight = BlockTemplate.Height,
             NetworkDifficulty = Difficulty,
-            Difficulty = stratumDifficulty / shareMultiplier,
+            Difficulty = ShareCredit.Difficulty(stratumDifficulty / shareMultiplier, Difficulty),
         };
 
         if(!isBlockCandidate)

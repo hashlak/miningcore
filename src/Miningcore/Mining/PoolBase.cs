@@ -74,6 +74,7 @@ public abstract class PoolBase : StratumServer,
     protected TimeSpan loginFailureBanTimeout = TimeSpan.FromSeconds(10); // overridden from banning.loginFailureBanTime in Configure()
     protected static readonly Regex regexStaticDiff = new(@";?d=(\d*(\.\d+)?)", RegexOptions.Compiled);
     protected const string PasswordControlVarsSeparator = ";";
+    protected virtual TimeSpan UnauthorizedTimeout => TimeSpan.FromSeconds(60);
 
     protected abstract Task SetupJobManager(CancellationToken ct);
     protected abstract WorkerContextBase CreateWorkerContext();
@@ -97,6 +98,14 @@ public abstract class PoolBase : StratumServer,
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// hashlak: the static difficulty a connection may use, see <see cref="ShareCredit.StaticDifficulty"/>
+    /// </summary>
+    protected double LimitStaticDiff(StratumConnection connection, double staticDiff)
+    {
+        return ShareCredit.StaticDifficulty(staticDiff, poolConfig.Ports[connection.LocalEndpoint.Port].VarDiff?.MaxDiff);
     }
 
     protected override void OnConnect(StratumConnection connection, IPEndPoint ipEndPoint)
@@ -128,6 +137,28 @@ public abstract class PoolBase : StratumServer,
 
                         Disconnect(connection);
                     }
+                }
+
+                catch(Exception ex)
+                {
+                    logger.Error(ex);
+                }
+            }, ex =>
+            {
+                logger.Error(ex, nameof(EnsureNoZombieClient));
+            });
+
+        // hashlak: ZombieCheck only sees authorized connections; one that never authorizes would hold its extranonce
+        Observable.Timer(clock.Now.Add(UnauthorizedTimeout))
+            .TakeUntil(connection.Terminated)
+            .Where(_ => connection.IsAlive && !connection.Context.IsAuthorized)
+            .Subscribe(_ =>
+            {
+                try
+                {
+                    logger.Info(() => $"[{connection.ConnectionId}] Closing a connection that did not authorize in time");
+
+                    Disconnect(connection);
                 }
 
                 catch(Exception ex)

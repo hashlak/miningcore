@@ -38,7 +38,10 @@ public class ProgpowPool : PoolBase
     {
     }
 
+    private static readonly TimeSpan PoolFullLogInterval = TimeSpan.FromMinutes(1);
+
     private ProgpowJobParams currentJobParams;
+    private DateTime lastPoolFullLog = DateTime.MinValue;
     private long currentJobId;
     private ProgpowJobManager manager;
     private ProgpowCoinTemplate coin;
@@ -55,6 +58,16 @@ public class ProgpowPool : PoolBase
         }
     }
 
+    private void LogPoolFull()
+    {
+        if(clock.Now - lastPoolFullLog < PoolFullLogInterval)
+            return;
+
+        lastPoolFullLog = clock.Now;
+
+        logger.Error(() => "All extranonces are held by live connections: new connections are being closed");
+    }
+
     protected virtual async Task OnSubscribeAsync(StratumConnection connection, Timestamped<JsonRpcRequest> tsRequest)
     {
         var request = tsRequest.Value;
@@ -65,6 +78,15 @@ public class ProgpowPool : PoolBase
         var context = connection.ContextAs<ProgpowWorkerContext>();
         var requestParams = request.ParamsAs<string[]>();
 
+        // hashlak: a full pool closes the socket and sends no error. kawpowminer treats a subscribe error as final and
+        // exits; on a closed socket it keeps retrying with a stratum+tcp:// URL, which is what our guides use
+        if(!manager.TryGetSubscriberData(connection, out var subscriberData))
+        {
+            LogPoolFull();
+            Disconnect(connection);
+            return;
+        }
+
         var data = new object[]
         {
             new object[]
@@ -73,7 +95,7 @@ public class ProgpowPool : PoolBase
                 new object[] { ProgpowStratumMethods.MiningNotify, connection.ConnectionId }
             }
         }
-        .Concat(manager.GetSubscriberData(connection))
+        .Concat(subscriberData)
         .ToArray();
 
         // Nicehash's stupid validator insists on "error" property present
@@ -183,9 +205,9 @@ public class ProgpowPool : PoolBase
                    context.VarDiff == null && staticDiff.Value > context.Difficulty))
             {
                 context.VarDiff = null; // disable vardiff
-                context.SetDifficulty(staticDiff.Value);
+                context.SetDifficulty(LimitStaticDiff(connection, staticDiff.Value));
 
-                logger.Info(() => $"[{connection.ConnectionId}] Setting static difficulty of {staticDiff.Value}");
+                logger.Info(() => $"[{connection.ConnectionId}] Setting static difficulty of {context.Difficulty}");
 
                 await connection.NotifyAsync(ProgpowStratumMethods.SetDifficulty, new object[] { createEncodeTarget(context.Difficulty) });
             }
@@ -258,9 +280,6 @@ public class ProgpowPool : PoolBase
                 return;
             }
 
-            // check worker state
-            context.LastActivity = clock.Now;
-
             // validate worker
             if(!context.IsAuthorized)
                 throw new StratumException(StratumError.UnauthorizedWorker, "unauthorized worker");
@@ -271,6 +290,9 @@ public class ProgpowPool : PoolBase
 
             // submit
             var share = await manager.SubmitShareAsync(connection, requestParams, ct);
+
+            // hashlak: only accepted work keeps a connection and its extranonce alive, junk submits do not
+            context.LastActivity = clock.Now;
 
             // Nicehash's stupid validator insists on "error" property present
             // in successful responses which is a violation of the JSON-RPC spec
@@ -283,10 +305,10 @@ public class ProgpowPool : PoolBase
                 response.Extra["error"] = null;
             }
 
-            await connection.RespondAsync(response);
-
-            // publish
+            // hashlak: publish first, a stalled socket must not lose a share, least of all a block
             messageBus.SendMessage(share);
+
+            await connection.RespondAsync(response);
 
             // telemetry
             PublishTelemetry(TelemetryCategory.Share, clock.Now - tsRequest.Timestamp.UtcDateTime, true);
@@ -329,9 +351,13 @@ public class ProgpowPool : PoolBase
         {
             var context = connection.ContextAs<ProgpowWorkerContext>();
 
+            // hashlak: a retarget waits for the next job (10 s at most). A notify with the same header makes miners
+            // restart from their first nonce and re-find what they already submitted. Applied first: the job reads it.
+            var hasNewDifficulty = context.ApplyPendingDifficulty();
+
             var minerJobParams = CreateWorkerJob(connection, currentJobParams.CleanJobs);
 
-            if(context.ApplyPendingDifficulty())
+            if(hasNewDifficulty)
                 await connection.NotifyAsync(ProgpowStratumMethods.SetDifficulty, new object[] { createEncodeTarget(context.Difficulty) });
 
             // send job
@@ -460,20 +486,6 @@ public class ProgpowPool : PoolBase
         catch(StratumException ex)
         {
             await connection.RespondErrorAsync(ex.Code, ex.Message, request.Id, false);
-        }
-    }
-
-    protected override async Task OnVarDiffUpdateAsync(StratumConnection connection, double newDiff, CancellationToken ct)
-    {
-        await base.OnVarDiffUpdateAsync(connection, newDiff, ct);
-
-        if(connection.Context.ApplyPendingDifficulty())
-        {
-            bool cleanJob = (currentJobParams.CleanJobs) ? !currentJobParams.CleanJobs : currentJobParams.CleanJobs;
-
-            var minerJobParams = CreateWorkerJob(connection, cleanJob);
-            await connection.NotifyAsync(ProgpowStratumMethods.SetDifficulty, new object[] { createEncodeTarget(connection.Context.Difficulty) });
-            await connection.NotifyAsync(ProgpowStratumMethods.MiningNotify, minerJobParams);
         }
     }
 

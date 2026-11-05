@@ -1,6 +1,7 @@
 using Miningcore.Blockchain.Cryptonote.DaemonResponses;
 using Miningcore.Configuration;
 using Miningcore.Extensions;
+using Miningcore.Mining;
 using Miningcore.Native;
 using Miningcore.Stratum;
 using Miningcore.Util;
@@ -202,7 +203,7 @@ public class CryptonoteJob
         var result = new Share
         {
             BlockHeight = BlockTemplate.Height,
-            Difficulty = stratumDifficulty,
+            Difficulty = ShareCredit.Difficulty(stratumDifficulty, BlockTemplate.Difficulty),
         };
 
         if(isBlockCandidate)

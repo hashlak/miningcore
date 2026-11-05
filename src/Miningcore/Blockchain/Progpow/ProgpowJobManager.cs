@@ -29,8 +29,10 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         IExtraNonceProvider extraNonceProvider) :
         base(ctx, clock, messageBus, extraNonceProvider)
     {
+        extraNonceLeases = new ExtraNonceLeases(extraNonceProvider);
     }
 
+    private readonly ExtraNonceLeases extraNonceLeases;
     private ProgpowCoinTemplate coin;
 
     private async Task<RpcResponse<BlockTemplate>> GetBlockTemplateAsync(CancellationToken ct)
@@ -106,6 +108,14 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         await base.PostStartInitAsync(ct);
     }
 
+    /// <summary>
+    /// hashlak: a forced refresh inside the same template second can rebuild the same header, under a new duplicate check
+    /// </summary>
+    public static bool IsSameHeaderRebuild(bool isNew, bool forceUpdate, BlockTemplate template, ProgpowJob job)
+    {
+        return !isNew && forceUpdate && template != null && template.CurTime == job?.BlockTemplate?.CurTime;
+    }
+
     protected override async Task<(bool IsNew, bool Force)> UpdateJob(CancellationToken ct, bool forceUpdate, string via = null, string json = null)
     {
         try
@@ -121,7 +131,7 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
             if(response.Error != null)
             {
                 logger.Warn(() => $"Unable to update job. Daemon responded with: {response.Error.Message} Code {response.Error.Code}");
-                return (false, forceUpdate);
+                return (false, false);   // hashlak: see below
             }
 
             var blockTemplate = response.Response;
@@ -134,6 +144,9 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
 
             if(isNew)
                 messageBus.NotifyChainHeight(poolConfig.Id, blockTemplate.Height, poolConfig.Template);
+
+            if(IsSameHeaderRebuild(isNew, forceUpdate, blockTemplate, job))
+                return (false, false);
 
             if(isNew || forceUpdate)
             {
@@ -186,7 +199,9 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
             logger.Error(ex, () => $"Error during {nameof(UpdateJob)}");
         }
 
-        return (false, forceUpdate);
+        // hashlak: no broadcast when no new job exists. The same header again makes miners restart from their first
+        // nonce and re-find what they submitted; those duplicates would get honest rigs banned during a daemon outage
+        return (false, false);
     }
 
     protected override object GetJobParamsForStratum(bool isNew)
@@ -222,22 +237,38 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         base.Configure(pc, cc);
     }
 
-    public object[] GetSubscriberData(StratumConnection worker)
+    /// <summary>
+    /// False when every extranonce is held by a live connection.
+    /// </summary>
+    public bool TryGetSubscriberData(StratumConnection worker, out object[] responseData)
     {
         Contract.RequiresNonNull(worker);
 
+        responseData = null;
+
         var context = worker.ContextAs<ProgpowWorkerContext>();
 
-        // assign unique ExtraNonce1 to worker (miner)
-        context.ExtraNonce1 = extraNonceProvider.Next();
+        // assign unique ExtraNonce1 to worker (miner); hashlak: leased for the connection's life, a second subscribe keeps it
+        if(context.ExtraNonce1 == null)
+        {
+            if(!extraNonceLeases.TryLease(out var extraNonce, out var release))
+                return false;
+
+            context.ExtraNonce1 = extraNonce;
+
+            worker.Terminated.Subscribe(_ => release.Dispose());
+
+            if(!worker.IsAlive)
+                release.Dispose();   // closed before the subscription above could see it
+        }
 
         // setup response data
-        var responseData = new object[]
+        responseData = new object[]
         {
             context.ExtraNonce1,
         };
 
-        return responseData;
+        return true;
     }
 
     public void PrepareWorkerJob(ProgpowWorkerJob workerJob, out string headerHash)
@@ -300,7 +331,9 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         {
             logger.Info(() => $"Submitting block {share.BlockHeight} [{share.BlockHash}]");
 
-            var acceptResponse = await SubmitBlockAsync(share, blockHex, ct);
+            // hashlak: not the connection's token. A miner dropping its socket must not cancel the block after the
+            // daemon took it: the coins would arrive with no blocks row and no credit. HttpClient's timeout still bounds it
+            var acceptResponse = await SubmitBlockAsync(share, blockHex, CancellationToken.None);
 
             // is it still a block candidate?
             share.IsBlockCandidate = acceptResponse.Accepted;
