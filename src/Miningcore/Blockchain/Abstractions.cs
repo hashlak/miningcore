@@ -17,5 +17,6 @@ public class BlockchainStats
 public interface IExtraNonceProvider
 {
     int ByteSize { get; }
+    ulong Capacity { get; }
     string Next();
 }

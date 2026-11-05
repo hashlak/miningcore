@@ -7,25 +7,25 @@ namespace Miningcore.Blockchain;
 
 public class ExtraNonceProviderBase : IExtraNonceProvider
 {
-    protected ExtraNonceProviderBase(string poolId, int extranonceBytes, byte? instanceId)
+    protected ExtraNonceProviderBase(string poolId, int extranonceBytes, byte? instanceId, int idBits = DefaultIdBits)
     {
         logger = LogUtil.GetPoolScopedLogger(GetType(), poolId);
 
         this.extranonceBytes = extranonceBytes;
-        idShift = (extranonceBytes * 8) - IdBits;
+        idShift = (extranonceBytes * 8) - idBits;
         nonceMax = (1UL << idShift) - 1;
-        idMax = (1U << IdBits) - 1;
+        idMax = (1U << idBits) - 1;
         stringFormat = "x" + extranonceBytes * 2;
 
         // generate instanceId if not provided
-        var mask = (1L << IdBits) - 1;
+        var mask = (1L << idBits) - 1;
 
         if(instanceId.HasValue)
         {
             id = instanceId.Value;
 
             if(id > idMax)
-                throw new PoolStartupException($"Provided instance id too large to fit into {IdBits} bits (limit {idMax})", poolId);
+                throw new PoolStartupException($"Provided instance id too large to fit into {idBits} bits (limit {idMax})", poolId);
         }
 
         else
@@ -41,12 +41,12 @@ public class ExtraNonceProviderBase : IExtraNonceProvider
         id = (byte) (id & mask);
         counter = 0;
 
-        logger.Info(()=> $"ExtraNonceProvider using {IdBits} bits for instance id, {extranonceBytes * 8 - IdBits} bits for {nonceMax} values, instance id = 0x{id:X}");
+        logger.Info(()=> $"ExtraNonceProvider using {idBits} bits for instance id, {extranonceBytes * 8 - idBits} bits for {nonceMax} values, instance id = 0x{id:X}");
     }
 
     private readonly ILogger logger;
 
-    private const int IdBits = 4;
+    private const int DefaultIdBits = 4;
     private readonly object counterLock = new();
     protected ulong counter;
     protected byte id;
@@ -59,6 +59,8 @@ public class ExtraNonceProviderBase : IExtraNonceProvider
     #region IExtraNonceProvider
 
     public int ByteSize => extranonceBytes;
+
+    public ulong Capacity => nonceMax + 1;
 
     public string Next()
     {

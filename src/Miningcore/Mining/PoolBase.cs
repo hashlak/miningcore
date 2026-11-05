@@ -74,7 +74,7 @@ public abstract class PoolBase : StratumServer,
     protected TimeSpan loginFailureBanTimeout = TimeSpan.FromSeconds(10); // overridden from banning.loginFailureBanTime in Configure()
     protected static readonly Regex regexStaticDiff = new(@";?d=(\d*(\.\d+)?)", RegexOptions.Compiled);
     protected const string PasswordControlVarsSeparator = ";";
-    private const int UnauthorizedTimeoutSeconds = 60;
+    protected virtual TimeSpan UnauthorizedTimeout => TimeSpan.FromSeconds(60);
 
     protected abstract Task SetupJobManager(CancellationToken ct);
     protected abstract WorkerContextBase CreateWorkerContext();
@@ -149,14 +149,22 @@ public abstract class PoolBase : StratumServer,
             });
 
         // hashlak: ZombieCheck only sees authorized connections; one that never authorizes would hold its extranonce
-        Observable.Timer(clock.Now.AddSeconds(UnauthorizedTimeoutSeconds))
+        Observable.Timer(clock.Now.Add(UnauthorizedTimeout))
             .TakeUntil(connection.Terminated)
             .Where(_ => connection.IsAlive && !connection.Context.IsAuthorized)
             .Subscribe(_ =>
             {
-                logger.Info(() => $"[{connection.ConnectionId}] Closing a connection that did not authorize in time");
+                try
+                {
+                    logger.Info(() => $"[{connection.ConnectionId}] Closing a connection that did not authorize in time");
 
-                Disconnect(connection);
+                    Disconnect(connection);
+                }
+
+                catch(Exception ex)
+                {
+                    logger.Error(ex);
+                }
             }, ex =>
             {
                 logger.Error(ex, nameof(EnsureNoZombieClient));

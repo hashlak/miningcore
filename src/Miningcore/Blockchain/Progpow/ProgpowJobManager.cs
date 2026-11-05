@@ -123,7 +123,7 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
             if(response.Error != null)
             {
                 logger.Warn(() => $"Unable to update job. Daemon responded with: {response.Error.Message} Code {response.Error.Code}");
-                return (false, forceUpdate);
+                return (false, false);   // hashlak: see below
             }
 
             var blockTemplate = response.Response;
@@ -188,7 +188,9 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
             logger.Error(ex, () => $"Error during {nameof(UpdateJob)}");
         }
 
-        return (false, forceUpdate);
+        // hashlak: no broadcast when no new job exists. The same header again makes miners restart from their first
+        // nonce and re-find what they submitted; those duplicates would get honest rigs banned during a daemon outage
+        return (false, false);
     }
 
     protected override object GetJobParamsForStratum(bool isNew)
@@ -224,18 +226,22 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         base.Configure(pc, cc);
     }
 
-    public object[] GetSubscriberData(StratumConnection worker)
+    /// <summary>
+    /// False when every extranonce is held by a live connection.
+    /// </summary>
+    public bool TryGetSubscriberData(StratumConnection worker, out object[] responseData)
     {
         Contract.RequiresNonNull(worker);
+
+        responseData = null;
 
         var context = worker.ContextAs<ProgpowWorkerContext>();
 
         // assign unique ExtraNonce1 to worker (miner); hashlak: leased for the connection's life, a second subscribe keeps it
         if(context.ExtraNonce1 == null)
         {
-            // the provider logs a warning on every lap, so a full pool shows in the log
             if(!extraNonceLeases.TryLease(out var extraNonce, out var release))
-                throw new StratumException(StratumError.Other, "pool is full, try again later");
+                return false;
 
             context.ExtraNonce1 = extraNonce;
 
@@ -246,12 +252,12 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         }
 
         // setup response data
-        var responseData = new object[]
+        responseData = new object[]
         {
             context.ExtraNonce1,
         };
 
-        return responseData;
+        return true;
     }
 
     public void PrepareWorkerJob(ProgpowWorkerJob workerJob, out string headerHash)

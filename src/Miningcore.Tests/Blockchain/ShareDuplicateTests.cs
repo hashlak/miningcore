@@ -132,9 +132,15 @@ public class ShareDuplicateTests : TestBase
     }
 
     private static ProgpowJobManager Manager() =>
-        new(Substitute.For<IComponentContext>(), Substitute.For<IMasterClock>(), Substitute.For<IMessageBus>(), new RavencoinExtraNonceProvider("rvn", 1));
+        new(Substitute.For<IComponentContext>(), Substitute.For<IMasterClock>(), Substitute.For<IMessageBus>(), new FiroExtraNonceProvider("firo", 1));
 
     private static StratumConnection Fresh(string id) => Connection(id, null);
+
+    private static string Subscribe(ProgpowJobManager manager, StratumConnection connection)
+    {
+        Assert.True(manager.TryGetSubscriberData(connection, out var data));
+        return (string) data[0];
+    }
 
     [Fact]
     public void A_connection_keeps_its_extranonce_on_a_second_subscribe()
@@ -142,7 +148,7 @@ public class ShareDuplicateTests : TestBase
         var manager = Manager();
         var a = Fresh("a");
 
-        Assert.Equal((string) manager.GetSubscriberData(a)[0], (string) manager.GetSubscriberData(a)[0]);
+        Assert.Equal(Subscribe(manager, a), Subscribe(manager, a));
     }
 
     [Fact]
@@ -152,7 +158,7 @@ public class ShareDuplicateTests : TestBase
         var seen = new HashSet<string>();
 
         for(var i = 0; i < 4096; i++)
-            Assert.True(seen.Add((string) manager.GetSubscriberData(Fresh($"c{i}"))[0]));
+            Assert.True(seen.Add(Subscribe(manager, Fresh($"c{i}"))));
     }
 
     [Fact]
@@ -161,10 +167,25 @@ public class ShareDuplicateTests : TestBase
         var manager = Manager();
 
         for(var i = 0; i < 4096; i++)
-            manager.GetSubscriberData(Fresh($"c{i}"));
+            Subscribe(manager, Fresh($"c{i}"));
 
-        var ex = Assert.Throws<StratumException>(() => manager.GetSubscriberData(Fresh("one-too-many")));
-        Assert.Equal(StratumError.Other, ex.Code);
+        Assert.False(manager.TryGetSubscriberData(Fresh("one-too-many"), out _));
+    }
+
+    [Fact]
+    public void KawPow_has_65536_extranonces_of_four_characters()
+    {
+        var provider = new RavencoinExtraNonceProvider("rvn", 1);
+        var seen = new HashSet<string>();
+
+        for(var i = 0; i < 65536; i++)
+        {
+            var value = provider.Next();
+            Assert.Equal(4, value.Length);
+            Assert.True(seen.Add(value));
+        }
+
+        Assert.Equal(65536UL, provider.Capacity);
     }
 
     [Fact]
@@ -172,11 +193,11 @@ public class ShareDuplicateTests : TestBase
     {
         var manager = Manager();
         var connections = Enumerable.Range(0, 4096).Select(i => Fresh($"c{i}")).ToArray();
-        var extraNonces = connections.Select(c => (string) manager.GetSubscriberData(c)[0]).ToArray();
+        var extraNonces = connections.Select(c => Subscribe(manager, c)).ToArray();
 
         Terminate(connections[7]);
 
-        Assert.Equal(extraNonces[7], (string) manager.GetSubscriberData(Fresh("new"))[0]);
+        Assert.Equal(extraNonces[7], Subscribe(manager, Fresh("new")));
     }
 
     [Fact]
@@ -186,13 +207,13 @@ public class ShareDuplicateTests : TestBase
         var connections = Enumerable.Range(0, 4095).Select(i => Fresh($"c{i}")).ToArray();
 
         foreach(var connection in connections)
-            manager.GetSubscriberData(connection);
+            Subscribe(manager, connection);
 
         var closing = Fresh("closing");
         closing.IsAlive = false;
-        var value = (string) manager.GetSubscriberData(closing)[0];
+        var value = Subscribe(manager, closing);
 
-        Assert.Equal(value, (string) manager.GetSubscriberData(Fresh("new"))[0]);
+        Assert.Equal(value, Subscribe(manager, Fresh("new")));
     }
 
     [Fact]
@@ -204,7 +225,7 @@ public class ShareDuplicateTests : TestBase
         release.Dispose();
 
         // the value goes to someone else, and a second dispose of the old lease must not free it
-        for(var i = 0; i < 4096; i++)
+        for(var i = 0; i < 65536; i++)
             Assert.True(leases.TryLease(out _, out _));
 
         release.Dispose();

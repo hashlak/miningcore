@@ -38,7 +38,10 @@ public class ProgpowPool : PoolBase
     {
     }
 
+    private static readonly TimeSpan PoolFullLogInterval = TimeSpan.FromMinutes(1);
+
     private ProgpowJobParams currentJobParams;
+    private DateTime lastPoolFullLog = DateTime.MinValue;
     private long currentJobId;
     private ProgpowJobManager manager;
     private ProgpowCoinTemplate coin;
@@ -55,6 +58,16 @@ public class ProgpowPool : PoolBase
         }
     }
 
+    private void LogPoolFull()
+    {
+        if(clock.Now - lastPoolFullLog < PoolFullLogInterval)
+            return;
+
+        lastPoolFullLog = clock.Now;
+
+        logger.Error(() => "All extranonces are held by live connections: new connections are being closed");
+    }
+
     protected virtual async Task OnSubscribeAsync(StratumConnection connection, Timestamped<JsonRpcRequest> tsRequest)
     {
         var request = tsRequest.Value;
@@ -65,6 +78,15 @@ public class ProgpowPool : PoolBase
         var context = connection.ContextAs<ProgpowWorkerContext>();
         var requestParams = request.ParamsAs<string[]>();
 
+        // hashlak: a full pool closes the socket and sends no error. kawpowminer treats a subscribe error as final and
+        // exits; on a closed socket it keeps retrying
+        if(!manager.TryGetSubscriberData(connection, out var subscriberData))
+        {
+            LogPoolFull();
+            Disconnect(connection);
+            return;
+        }
+
         var data = new object[]
         {
             new object[]
@@ -73,7 +95,7 @@ public class ProgpowPool : PoolBase
                 new object[] { ProgpowStratumMethods.MiningNotify, connection.ConnectionId }
             }
         }
-        .Concat(manager.GetSubscriberData(connection))
+        .Concat(subscriberData)
         .ToArray();
 
         // Nicehash's stupid validator insists on "error" property present
@@ -258,9 +280,6 @@ public class ProgpowPool : PoolBase
                 return;
             }
 
-            // check worker state
-            context.LastActivity = clock.Now;
-
             // validate worker
             if(!context.IsAuthorized)
                 throw new StratumException(StratumError.UnauthorizedWorker, "unauthorized worker");
@@ -271,6 +290,9 @@ public class ProgpowPool : PoolBase
 
             // submit
             var share = await manager.SubmitShareAsync(connection, requestParams, ct);
+
+            // hashlak: only accepted work keeps a connection and its extranonce alive, junk submits do not
+            context.LastActivity = clock.Now;
 
             // Nicehash's stupid validator insists on "error" property present
             // in successful responses which is a violation of the JSON-RPC spec

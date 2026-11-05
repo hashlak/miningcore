@@ -28,6 +28,10 @@ public sealed class ExtraNonceLeases
 
         lock(held)
         {
+            // no lap of the counter when the answer is already known
+            if((ulong) held.Count >= provider.Capacity)
+                return false;
+
             string first = null;
 
             while(true)
