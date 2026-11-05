@@ -268,6 +268,14 @@ public class CryptonotePool : PoolBase
                     throw new StaleShareException(StratumError.MinusOne, "invalid jobid");
             }
 
+            // hashlak: stale and malformed work is refused before it can enter the duplicate set, which lives as long as
+            // the worker job and would otherwise grow with every late submit (review 2026-11-06)
+            if(manager.IsStale(job))
+                throw new StaleShareException(StratumError.MinusOne, "block expired");
+
+            if(submitRequest.Nonce == null || !CryptonoteConstants.RegexValidNonce.IsMatch(submitRequest.Nonce))
+                throw new StratumException(StratumError.MinusOne, "malformed nonce");
+
             // dupe check
             if(!job.Submissions.TryAdd(submitRequest.Nonce, true))
                 throw new StratumException(StratumError.MinusOne, "duplicate share");
@@ -301,7 +309,7 @@ public class CryptonotePool : PoolBase
                 poolStats.LastPoolBlockTime = clock.Now;
 
             // update client stats
-            context.Stats.ValidShares++;
+            RecordAcceptedShare(context);
 
             await UpdateVarDiffAsync(connection, false, ct);
         }

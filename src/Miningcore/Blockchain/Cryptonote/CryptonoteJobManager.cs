@@ -308,6 +308,19 @@ public class CryptonoteJobManager : JobManagerBase<CryptonoteJob>
         return true;
     }
 
+    /// <summary>
+    /// hashlak: a worker job is stale once the current template is not the one it was cut from. Height alone let a
+    /// job from before a same-height reorg be validated against the new template (review 2026-11-05), so the prev
+    /// hash counts too. Checked before the duplicate set is touched (review 2026-11-06).
+    /// </summary>
+    public bool IsStale(CryptonoteWorkerJob workerJob) => IsStale(workerJob, currentJob);
+
+    public static bool IsStale(CryptonoteWorkerJob workerJob, CryptonoteJob job) =>
+        IsStale(workerJob.Height, workerJob.PrevHash, job?.BlockTemplate.Height, job?.PrevHash);
+
+    public static bool IsStale(uint workerHeight, string workerPrevHash, uint? currentHeight, string currentPrevHash) =>
+        currentHeight == null || workerHeight != currentHeight.Value || workerPrevHash != currentPrevHash;
+
     public void PrepareWorkerJob(CryptonoteWorkerJob workerJob, out string blob, out string target)
     {
         blob = null;
@@ -428,9 +441,8 @@ public class CryptonoteJobManager : JobManagerBase<CryptonoteJob>
 
         var context = worker.ContextAs<CryptonoteWorkerContext>();
 
-        // hashlak: height alone let a job from before a same-height reorg be validated against the new template (review 2026-11-05)
         var job = currentJob;
-        if(workerJob.Height != job?.BlockTemplate.Height || workerJob.PrevHash != job.PrevHash)
+        if(IsStale(workerJob, job))
             throw new StaleShareException(StratumError.MinusOne, "block expired");
 
         // validate & process

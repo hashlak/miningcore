@@ -298,8 +298,9 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         {
             job = context.GetJob(jobId);
 
+            // hashlak: Debug and sanitized — the id is miner-supplied text and a stale submit never bans (review 2026-11-06)
             if(job == null)
-                logger.Warn(() => $"[{context.Miner}] => jobId: {jobId} - Last known job: {context.validJobs.ToArray().FirstOrDefault()?.JobId}");
+                logger.Debug(() => $"[{context.Miner}] => jobId: {LogSanitizer.Name(jobId, 16)} - Last known job: {context.validJobs.ToArray().FirstOrDefault()?.JobId}");
         }
 
         if(job == null)

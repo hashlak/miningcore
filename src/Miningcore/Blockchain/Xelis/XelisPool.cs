@@ -325,7 +325,7 @@ public class XelisPool : PoolBase
                 poolStats.LastPoolBlockTime = clock.Now;
 
             // update client stats
-            context.Stats.ValidShares++;
+            RecordAcceptedShare(context);
 
             await UpdateVarDiffAsync(connection, false, ct);
         }

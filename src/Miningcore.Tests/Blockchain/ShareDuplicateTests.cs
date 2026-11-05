@@ -327,6 +327,16 @@ public class ShareDuplicateTests : TestBase
     }
 
     [Theory]
+    [InlineData(10u, "aa", 10u, "aa", false)]
+    [InlineData(10u, "aa", 11u, "bb", true)]    // next block
+    [InlineData(10u, "aa", 10u, "bb", true)]    // same height, another tip: a reorg
+    [InlineData(10u, "aa", null, null, true)]   // no current job
+    public void Cryptonote_worker_job_is_stale_when_the_height_or_the_prev_hash_moved(uint height, string prevHash, uint? currentHeight, string currentPrevHash, bool stale)
+    {
+        Assert.Equal(stale, CryptonoteJobManager.IsStale(height, prevHash, currentHeight, currentPrevHash));
+    }
+
+    [Theory]
     [InlineData(null, 8)]
     [InlineData("", 8)]
     [InlineData("deadbee", 8)]
