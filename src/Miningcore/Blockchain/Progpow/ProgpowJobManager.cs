@@ -108,6 +108,14 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         await base.PostStartInitAsync(ct);
     }
 
+    /// <summary>
+    /// hashlak: a forced refresh inside the same template second can rebuild the same header, under a new duplicate check
+    /// </summary>
+    public static bool IsSameHeaderRebuild(bool isNew, bool forceUpdate, BlockTemplate template, ProgpowJob job)
+    {
+        return !isNew && forceUpdate && template != null && template.CurTime == job?.BlockTemplate?.CurTime;
+    }
+
     protected override async Task<(bool IsNew, bool Force)> UpdateJob(CancellationToken ct, bool forceUpdate, string via = null, string json = null)
     {
         try
@@ -136,6 +144,9 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
 
             if(isNew)
                 messageBus.NotifyChainHeight(poolConfig.Id, blockTemplate.Height, poolConfig.Template);
+
+            if(IsSameHeaderRebuild(isNew, forceUpdate, blockTemplate, job))
+                return (false, false);
 
             if(isNew || forceUpdate)
             {
@@ -320,7 +331,9 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         {
             logger.Info(() => $"Submitting block {share.BlockHeight} [{share.BlockHash}]");
 
-            var acceptResponse = await SubmitBlockAsync(share, blockHex, ct);
+            // hashlak: not the connection's token. A miner dropping its socket must not cancel the block after the
+            // daemon took it: the coins would arrive with no blocks row and no credit. HttpClient's timeout still bounds it
+            var acceptResponse = await SubmitBlockAsync(share, blockHex, CancellationToken.None);
 
             // is it still a block candidate?
             share.IsBlockCandidate = acceptResponse.Accepted;

@@ -79,7 +79,7 @@ public class ProgpowPool : PoolBase
         var requestParams = request.ParamsAs<string[]>();
 
         // hashlak: a full pool closes the socket and sends no error. kawpowminer treats a subscribe error as final and
-        // exits; on a closed socket it keeps retrying
+        // exits; on a closed socket it keeps retrying with a stratum+tcp:// URL, which is what our guides use
         if(!manager.TryGetSubscriberData(connection, out var subscriberData))
         {
             LogPoolFull();

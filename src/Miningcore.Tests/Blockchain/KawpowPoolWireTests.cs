@@ -111,7 +111,9 @@ public class KawpowPoolWireTests : TestBase
         public Pool(IComponentContext ctx, JsonSerializerSettings settings, IConnectionFactory cf, IStatsRepository stats, IMapper mapper, IMasterClock clock, IMessageBus bus, RecyclableMemoryStreamManager rmsm, NicehashService nicehash)
             : base(ctx, settings, cf, stats, mapper, clock, bus, rmsm, nicehash) { }
 
-        protected override TimeSpan UnauthorizedTimeout => TimeSpan.FromSeconds(1);
+        public TimeSpan UnauthorizedLimit = TimeSpan.FromSeconds(60);
+
+        protected override TimeSpan UnauthorizedTimeout => UnauthorizedLimit;
 
         public Task Serve(CancellationToken ct, StratumEndpoint endpoint) => RunAsync(ct, new[] { endpoint });
         public Task Broadcast(object job) => OnNewJobAsync(job);
@@ -315,17 +317,17 @@ public class KawpowPoolWireTests : TestBase
     [Fact]
     public async Task Only_accepted_shares_keep_a_connection_alive()
     {
-        using var rig = NewRig(clientTimeout: 2);
+        using var rig = NewRig(clientTimeout: 3);
         var (junk, _) = await Miner(rig);
         var (honest, extraNonce) = await Miner(rig);
 
-        for(var i = 1; i <= 5; i++)
+        for(var i = 1; i <= 6; i++)
         {
             if(!junk.Closed)
                 await junk.Send("mining.submit", "Rgood.rig1", "no-such-job", "0x0", "0x0", "0x0");
 
             var response = await honest.Response(await SubmitValid(honest, extraNonce, (ulong) i));
-            Assert.Equal(JTokenType.Null, response?["error"]?.Type ?? JTokenType.Null);
+            Assert.True((bool) response!["result"]);
 
             await Task.Delay(1000);
             await rig.Pool.Broadcast(rig.Manager.Params());
@@ -409,12 +411,14 @@ public class KawpowPoolWireTests : TestBase
     public async Task A_connection_that_does_not_authorize_in_time_is_closed()
     {
         using var rig = NewRig();
+        rig.Pool.UnauthorizedLimit = TimeSpan.FromSeconds(2);
+
         var (subscribedOnly, _) = await Subscribe(rig);
         var (authorized, _) = await Miner(rig);
 
         Assert.True(await Until(() => subscribedOnly.Closed));
 
-        await Task.Delay(500);
+        await Task.Delay(1000);
         Assert.False(authorized.Closed);
     }
 
@@ -425,8 +429,31 @@ public class KawpowPoolWireTests : TestBase
         var (client, _) = await Miner(rig);
         var before = client.Notifies("mining.notify").Length;
         var emitted = 0;
+        var attempts = 0;
 
-        rig.Manager.StartWithDeadDaemon(new RpcClient(new DaemonEndpointConfig { Host = "127.0.0.1", Port = 1 }, jsonSerializerSettings, new MessageBus(), "rvn"), rig.Cts.Token);
+        // a daemon that drops every request, so the test sees that forced refreshes really ran
+        var daemon = new TcpListener(IPAddress.Loopback, 0);
+        daemon.Start();
+        var daemonPort = ((IPEndPoint) daemon.LocalEndpoint).Port;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while(true)
+                {
+                    using var dropped = await daemon.AcceptTcpClientAsync(rig.Cts.Token);
+                    Interlocked.Increment(ref attempts);
+                }
+            }
+
+            catch(OperationCanceledException)
+            {
+                daemon.Stop();
+            }
+        });
+
+        rig.Manager.StartWithDeadDaemon(new RpcClient(new DaemonEndpointConfig { Host = "127.0.0.1", Port = daemonPort }, jsonSerializerSettings, new MessageBus(), "rvn"), rig.Cts.Token);
 
         using var subscription = rig.Manager.Jobs.Subscribe(job =>
         {
@@ -436,7 +463,30 @@ public class KawpowPoolWireTests : TestBase
 
         await Task.Delay(3500);   // jobRebroadcastTimeout is 1 s here
 
+        Assert.True(attempts >= 2, $"only {attempts} refresh attempts reached the daemon");
         Assert.Equal(0, emitted);
         Assert.Equal(before, client.Notifies("mining.notify").Length);
+    }
+
+    [Fact]
+    public void A_forced_refresh_in_the_same_template_second_does_not_rebuild()
+    {
+        var template = JsonConvert.DeserializeObject<BlockTemplate>(Template, jsonSerializerSettings);
+        var current = new ProgpowJobWithTemplate(template);
+
+        Assert.True(ProgpowJobManager.IsSameHeaderRebuild(false, true, template, current));
+
+        var later = JsonConvert.DeserializeObject<BlockTemplate>(Template, jsonSerializerSettings);
+        later!.CurTime++;
+
+        Assert.False(ProgpowJobManager.IsSameHeaderRebuild(false, true, later, current));   // the header changes
+        Assert.False(ProgpowJobManager.IsSameHeaderRebuild(true, true, template, current));  // a new block always builds
+        Assert.False(ProgpowJobManager.IsSameHeaderRebuild(false, false, template, current));
+        Assert.False(ProgpowJobManager.IsSameHeaderRebuild(false, true, template, null));
+    }
+
+    private class ProgpowJobWithTemplate : ProgpowJob
+    {
+        public ProgpowJobWithTemplate(BlockTemplate template) => BlockTemplate = template;
     }
 }

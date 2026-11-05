@@ -4,9 +4,9 @@ using Miningcore.Mining;
 namespace Miningcore.Blockchain;
 
 /// <summary>
-/// hashlak: an extranonce belongs to one live connection. The provider's counter wraps (4,096 values on KawPow) and
-/// hands out values still in use; two connections on one extranonce see the same header on every job, so one rig's
-/// nonces are valid on the other. A lease skips the values held by a live connection.
+/// hashlak: an extranonce belongs to one live connection. The provider's counter wraps and hands out values still in
+/// use; two connections on one extranonce see the same header on every job, so one rig's nonces are valid on the
+/// other. A lease skips the values held by a live connection.
 /// </summary>
 public sealed class ExtraNonceLeases
 {
