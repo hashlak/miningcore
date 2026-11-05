@@ -232,6 +232,9 @@ public class PPLNSPaymentScheme : IPayoutScheme
             before = page[^1].Created;
         }
 
+        // hashlak: leaving the loop on cancellation would commit part of the block's credit and confirm the block
+        ct.ThrowIfCancellationRequested();
+
         logger.Info(() => $"Balance-calculation for pool {poolConfig.Id}, block {block.BlockHeight} completed with accumulated score {accumulatedScore:0.####} ({(accumulatedScore / window) * 100:0.#}%)");
 
         return shareCutOffDate;

@@ -119,6 +119,52 @@ public class PPLNSCreditCapTests
         Assert.Equal(50m, credited["b"]);
     }
 
+    private void ReadPages(Func<int, Share[]> read)
+    {
+        var calls = 0;
+        shareRepo.ReadSharesBeforeAsync(con, "p", Arg.Any<DateTime>(), Arg.Any<bool>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(_ => Task.FromResult(read(calls++)));
+        shareRepo.CountSharesBeforeAsync(con, tx, "p", Arg.Any<DateTime>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult(1L));
+    }
+
+    private Task Update(CancellationToken ct) =>
+        new PPLNSPaymentScheme(cf, shareRepo, blockRepo, balanceRepo)
+            .UpdateBalancesAsync(con, tx, pool, handler, new Block { BlockHeight = 1, Created = Now, Miner = "a" }, BlockReward, ct);
+
+    [Fact]
+    public async Task A_failing_discard_log_still_prunes()
+    {
+        ReadPages(c => c == 0 ? new[] { S("a", Network), S("b", Network, 1) } : throw new IndexOutOfRangeException());
+
+        await Update(CancellationToken.None);
+
+        await shareRepo.Received(1).DeleteSharesBeforeAsync(con, tx, "p", Arg.Any<DateTime>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Cancellation_in_the_discard_log_aborts_the_update()
+    {
+        ReadPages(c => c == 0 ? new[] { S("a", Network), S("b", Network, 1) } : throw new OperationCanceledException());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Update(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Cancellation_between_share_pages_does_not_commit_part_of_a_block()
+    {
+        using var cts = new CancellationTokenSource();
+        var page = Enumerable.Range(0, 50000).Select(i => S("a", Network / 200000, i)).ToArray();
+
+        ReadPages(_ =>
+        {
+            cts.Cancel();
+            return page;
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Update(cts.Token));
+        Assert.Empty(credited);
+    }
+
     [Fact]
     public async Task Ordinary_shares_are_paid_as_before()
     {

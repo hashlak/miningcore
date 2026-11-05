@@ -1,20 +1,40 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Reactive;
+using System.Reactive.Subjects;
+using System.Reflection;
+using System.Security.Cryptography;
+using Autofac;
 using Miningcore.Blockchain;
+using Miningcore.Blockchain.Bitcoin;
 using Miningcore.Blockchain.Cryptonote;
 using Miningcore.Blockchain.Progpow;
+using Miningcore.Configuration;
+using Miningcore.Crypto.Hashing.Progpow;
+using Miningcore.Extensions;
+using Miningcore.Messaging;
 using Miningcore.Mining;
 using Miningcore.Stratum;
+using Miningcore.Tests.Util;
+using Miningcore.Time;
 using Miningcore.Util;
+using NBitcoin;
+using Newtonsoft.Json;
 using NLog;
+using NSubstitute;
 using Xunit;
+using BlockTemplate = Miningcore.Blockchain.Bitcoin.DaemonResponses.BlockTemplate;
+using ILogger = NLog.ILogger;
+using Share = Miningcore.Blockchain.Share;
 
 namespace Miningcore.Tests.Blockchain;
 
 /// <summary>
 /// hashlak: review 2026-11-05. One piece of work is credited once, however the nonce is spelled or re-submitted.
 /// </summary>
-public class ShareDuplicateTests
+public class ShareDuplicateTests : TestBase
 {
     private const string ExtraNonce = "abcd";
     private const string Nonce = "abcd12345678ef01";
@@ -100,14 +120,154 @@ public class ShareDuplicateTests
     }
 
     [Fact]
-    public void Progpow_does_not_let_two_rigs_on_one_extranonce_refuse_each_other()
+    public void Progpow_refuses_the_same_work_from_another_connection()
     {
         var job = new RecordingJob();
 
         WorkerJob(job).ProcessShare(Logger, Connection("rig-a"), Nonce, HeaderHash, MixHash);
-        WorkerJob(job).ProcessShare(Logger, Connection("rig-b"), Nonce, HeaderHash, MixHash);
 
-        Assert.Equal(2, job.Hashed.Count);
+        var ex = Assert.Throws<StratumException>(() => WorkerJob(job).ProcessShare(Logger, Connection("rig-b"), Nonce, HeaderHash, MixHash));
+        Assert.Equal(StratumError.DuplicateShare, ex.Code);
+        Assert.Single(job.Hashed);
+    }
+
+    private static ProgpowJobManager Manager() =>
+        new(Substitute.For<IComponentContext>(), Substitute.For<IMasterClock>(), Substitute.For<IMessageBus>(), new RavencoinExtraNonceProvider("rvn", 1));
+
+    private static StratumConnection Fresh(string id) => Connection(id, null);
+
+    [Fact]
+    public void A_connection_keeps_its_extranonce_on_a_second_subscribe()
+    {
+        var manager = Manager();
+        var a = Fresh("a");
+
+        Assert.Equal((string) manager.GetSubscriberData(a)[0], (string) manager.GetSubscriberData(a)[0]);
+    }
+
+    [Fact]
+    public void No_two_live_connections_get_the_same_extranonce()
+    {
+        var manager = Manager();
+        var seen = new HashSet<string>();
+
+        for(var i = 0; i < 4096; i++)
+            Assert.True(seen.Add((string) manager.GetSubscriberData(Fresh($"c{i}"))[0]));
+    }
+
+    [Fact]
+    public void A_subscribe_is_refused_when_every_extranonce_is_held()
+    {
+        var manager = Manager();
+
+        for(var i = 0; i < 4096; i++)
+            manager.GetSubscriberData(Fresh($"c{i}"));
+
+        var ex = Assert.Throws<StratumException>(() => manager.GetSubscriberData(Fresh("one-too-many")));
+        Assert.Equal(StratumError.Other, ex.Code);
+    }
+
+    [Fact]
+    public void A_closed_connection_gives_its_extranonce_back()
+    {
+        var manager = Manager();
+        var connections = Enumerable.Range(0, 4096).Select(i => Fresh($"c{i}")).ToArray();
+        var extraNonces = connections.Select(c => (string) manager.GetSubscriberData(c)[0]).ToArray();
+
+        Terminate(connections[7]);
+
+        Assert.Equal(extraNonces[7], (string) manager.GetSubscriberData(Fresh("new"))[0]);
+    }
+
+    [Fact]
+    public void A_connection_closed_during_its_subscribe_gives_its_extranonce_back()
+    {
+        var manager = Manager();
+        var connections = Enumerable.Range(0, 4095).Select(i => Fresh($"c{i}")).ToArray();
+
+        foreach(var connection in connections)
+            manager.GetSubscriberData(connection);
+
+        var closing = Fresh("closing");
+        closing.IsAlive = false;
+        var value = (string) manager.GetSubscriberData(closing)[0];
+
+        Assert.Equal(value, (string) manager.GetSubscriberData(Fresh("new"))[0]);
+    }
+
+    [Fact]
+    public void A_lease_is_released_once_however_often_it_is_disposed()
+    {
+        var leases = new ExtraNonceLeases(new RavencoinExtraNonceProvider("rvn", 1));
+
+        Assert.True(leases.TryLease(out var first, out var release));
+        release.Dispose();
+
+        // the value goes to someone else, and a second dispose of the old lease must not free it
+        for(var i = 0; i < 4096; i++)
+            Assert.True(leases.TryLease(out _, out _));
+
+        release.Dispose();
+
+        Assert.False(leases.TryLease(out _, out _));
+        Assert.NotNull(first);
+    }
+
+    /// <summary>What StratumConnection's teardown does; it needs a live socket otherwise.</summary>
+    private static void Terminate(StratumConnection connection)
+    {
+        connection.IsAlive = false;
+
+        var terminated = (Subject<Unit>) typeof(StratumConnection)
+            .GetField("terminated", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(connection);
+
+        terminated!.OnNext(Unit.Default);
+    }
+
+    private class FixedResultCache : IProgpowCache
+    {
+        public byte[] SeedHash { get; set; } = new byte[32];
+
+        public static byte[] Mix(byte[] header, ulong nonce) => SHA256.HashData(header.Concat(BitConverter.GetBytes(nonce)).ToArray());
+
+        public bool Compute(ILogger logger, int blockNumber, byte[] hash, ulong nonce, out byte[] mixDigest, out byte[] result)
+        {
+            mixDigest = Mix(hash, nonce);
+            result = new byte[32];
+            result[31] = 1;   // meets any target: a block candidate
+            return true;
+        }
+
+        public void Dispose() { }
+    }
+
+    private const string RealTemplate = """
+        {"version":805306368,"previousBlockhash":"0000011a86a1ad3609e5359b6b6411a1654108ee7c1afc003dec23b5a0400e4b","coinbaseValue":125000000000,"target":"00000000000000ff000000000000000000000000000000000000000000000000","curTime":1665423220,"bits":"1a00ffff","height":3000000,"transactions":[],"coinbaseAux":{"flags":null}}
+        """;
+
+    [Fact]
+    public void A_block_candidate_on_KawPow_is_credited_at_most_the_network_difficulty()
+    {
+        var coin = (ProgpowCoinTemplate) ModuleInitializer.CoinTemplates["ravencoin"];
+        var template = JsonConvert.DeserializeObject<BlockTemplate>(RealTemplate, jsonSerializerSettings);
+        var destination = BitcoinUtils.AddressToDestination("yNkA6gVSPqKzW6WmJtTazRLKbSkQA5ND2h", Network.TestNet);
+
+        var job = new ProgpowJob();
+        job.Init(template, "1", new PoolConfig { Template = coin }, null, new ClusterConfig(), MockMasterClock.FromTicks(638010200200475015),
+            destination, Network.GetNetwork("testnet"), false, coin.ShareMultiplier, coin.CoinbaseHasherValue, coin.HeaderHasherValue, coin.BlockHasherValue, new FixedResultCache());
+
+        var connection = new StratumConnection(Logger, null, null, "c", false);
+        connection.SetContext(new ProgpowWorkerContext { ExtraNonce1 = ExtraNonce, Difficulty = 1e30, Miner = "m" });
+
+        var workerJob = new ProgpowWorkerJob("1", ExtraNonce);
+        job.PrepareWorkerJob(workerJob, out var headerHash);
+
+        var mix = FixedResultCache.Mix(headerHash.HexToByteArray(), Convert.ToUInt64(Nonce, 16)).ToHexString();
+        var share = workerJob.ProcessShare(Logger, connection, Nonce, headerHash, mix).Share;
+
+        Assert.True(share.IsBlockCandidate);
+        Assert.Equal(share.NetworkDifficulty, share.Difficulty);
     }
 
     [Fact]

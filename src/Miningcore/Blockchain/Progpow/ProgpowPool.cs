@@ -329,9 +329,13 @@ public class ProgpowPool : PoolBase
         {
             var context = connection.ContextAs<ProgpowWorkerContext>();
 
+            // hashlak: a retarget waits for the next job (10 s at most). A notify with the same header makes miners
+            // restart from their first nonce and re-find what they already submitted. Applied first: the job reads it.
+            var hasNewDifficulty = context.ApplyPendingDifficulty();
+
             var minerJobParams = CreateWorkerJob(connection, currentJobParams.CleanJobs);
 
-            if(context.ApplyPendingDifficulty())
+            if(hasNewDifficulty)
                 await connection.NotifyAsync(ProgpowStratumMethods.SetDifficulty, new object[] { createEncodeTarget(context.Difficulty) });
 
             // send job
@@ -460,20 +464,6 @@ public class ProgpowPool : PoolBase
         catch(StratumException ex)
         {
             await connection.RespondErrorAsync(ex.Code, ex.Message, request.Id, false);
-        }
-    }
-
-    protected override async Task OnVarDiffUpdateAsync(StratumConnection connection, double newDiff, CancellationToken ct)
-    {
-        await base.OnVarDiffUpdateAsync(connection, newDiff, ct);
-
-        if(connection.Context.ApplyPendingDifficulty())
-        {
-            bool cleanJob = (currentJobParams.CleanJobs) ? !currentJobParams.CleanJobs : currentJobParams.CleanJobs;
-
-            var minerJobParams = CreateWorkerJob(connection, cleanJob);
-            await connection.NotifyAsync(ProgpowStratumMethods.SetDifficulty, new object[] { createEncodeTarget(connection.Context.Difficulty) });
-            await connection.NotifyAsync(ProgpowStratumMethods.MiningNotify, minerJobParams);
         }
     }
 

@@ -43,7 +43,7 @@ public class ProgpowWorkerJob
             throw new StratumException(StratumError.Other, $"nonce out of range: {canonicalNonce}");
 
         // dupe check, per job: a retarget creates a new worker job on the same job
-        if(!Job.RegisterSubmit(worker.ConnectionId, canonicalNonce))
+        if(!Job.RegisterSubmit(canonicalNonce))
             throw new StratumException(StratumError.DuplicateShare, "duplicate share");
 
         var nonceLong = ulong.Parse(canonicalNonce, NumberStyles.HexNumber);

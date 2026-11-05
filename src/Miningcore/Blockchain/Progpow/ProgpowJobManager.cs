@@ -29,8 +29,10 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
         IExtraNonceProvider extraNonceProvider) :
         base(ctx, clock, messageBus, extraNonceProvider)
     {
+        extraNonceLeases = new ExtraNonceLeases(extraNonceProvider);
     }
 
+    private readonly ExtraNonceLeases extraNonceLeases;
     private ProgpowCoinTemplate coin;
 
     private async Task<RpcResponse<BlockTemplate>> GetBlockTemplateAsync(CancellationToken ct)
@@ -228,8 +230,20 @@ public class ProgpowJobManager : BitcoinJobManagerBase<ProgpowJob>
 
         var context = worker.ContextAs<ProgpowWorkerContext>();
 
-        // assign unique ExtraNonce1 to worker (miner); hashlak: only once per connection, a second subscribe keeps it
-        context.ExtraNonce1 ??= extraNonceProvider.Next();
+        // assign unique ExtraNonce1 to worker (miner); hashlak: leased for the connection's life, a second subscribe keeps it
+        if(context.ExtraNonce1 == null)
+        {
+            // the provider logs a warning on every lap, so a full pool shows in the log
+            if(!extraNonceLeases.TryLease(out var extraNonce, out var release))
+                throw new StratumException(StratumError.Other, "pool is full, try again later");
+
+            context.ExtraNonce1 = extraNonce;
+
+            worker.Terminated.Subscribe(_ => release.Dispose());
+
+            if(!worker.IsAlive)
+                release.Dispose();   // closed before the subscription above could see it
+        }
 
         // setup response data
         var responseData = new object[]
