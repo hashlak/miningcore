@@ -322,7 +322,8 @@ public class XelisJobManager : JobManagerBase<XelisJob>
         {
             logger.Info(() => $"Submitting block {share.BlockHeight} [{share.BlockHash}][{blockHeaderHex}]");
 
-            var acceptResponse = await SubmitBlockAsync(share, blockHeaderHex, ct);
+            // hashlak: not the connection's token, see ProgpowJobManager
+            var acceptResponse = await SubmitBlockAsync(share, blockHeaderHex, CancellationToken.None);
 
             // is it still a block candidate?
             share.IsBlockCandidate = acceptResponse;

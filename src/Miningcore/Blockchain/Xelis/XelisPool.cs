@@ -310,10 +310,10 @@ public class XelisPool : PoolBase
             }
 
             // respond
-            await connection.RespondAsync(response);
-
-            // publish
+            // hashlak: publish first, a stalled socket must not lose a share, least of all a block
             messageBus.SendMessage(share);
+
+            await connection.RespondAsync(response);
 
             // telemetry
             PublishTelemetry(TelemetryCategory.Share, clock.Now - tsRequest.Timestamp.UtcDateTime, true);
