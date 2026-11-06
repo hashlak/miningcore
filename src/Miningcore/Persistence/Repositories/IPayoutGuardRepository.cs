@@ -27,6 +27,9 @@ public interface IPayoutGuardRepository
 
     Task UpdateRunStatsAsync(IDbConnection con, IDbTransaction tx, string poolId, decimal paidToday, decimal expectedToday, decimal? walletBalance);
 
+    /// <summary>Notes on the pool's state row that the daily cap deferred payees just now (read by ops:health on srv2).</summary>
+    Task RecordDeferralAsync(IDbConnection con, IDbTransaction tx, string poolId, int count, decimal amount);
+
     /// <summary>Σ item amounts with status reserved/paid/unresolved whose run was created in the last 24 hours.</summary>
     Task<decimal> GetPaidLast24hAsync(IDbConnection con, IDbTransaction tx, string poolId);
 

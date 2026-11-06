@@ -94,6 +94,22 @@ public static class PayoutGuardPolicy
     }
 
     /// <summary>
+    /// hashlak: at most <paramref name="maxPayees"/> items, largest first; the rest wait for the next run. Unlike the daily
+    /// cap this is no sign of trouble: a paid balance drops out, so a queue drains within a few runs.
+    /// </summary>
+    public static (Balance[] Pay, Balance[] Waiting) ApplyRunLimit(Balance[] items, int? maxPayees)
+    {
+        Contract.RequiresNonNull(items);
+
+        if(maxPayees is not > 0 || items.Length <= maxPayees)
+            return (items, Array.Empty<Balance>());
+
+        var ordered = items.OrderByDescending(x => x.Amount).ThenBy(x => x.Address, StringComparer.Ordinal).ToArray();
+
+        return (ordered.Take(maxPayees.Value).ToArray(), ordered.Skip(maxPayees.Value).ToArray());
+    }
+
+    /// <summary>
     /// More was credited in the last 24 h than the confirmed blocks can explain — the check that catches a block-reward
     /// bug before the money leaves. Credits without a single credited block are an anomaly too.
     /// </summary>
@@ -377,6 +393,7 @@ public class PayoutGuard : IPayoutGuard
         var coin = pool.Template.Symbol;
         string tripReason = null;
         string deferNote = null;
+        string runLimitNote = null;
 
         // the pool's advisory payout lock lives on its own connection from here until finalize: a second process, or
         // the operator script, that cannot take it knows a run is in flight and leaves its rows alone
@@ -448,13 +465,24 @@ public class PayoutGuard : IPayoutGuard
                 var (pay, deferred) = PayoutGuardPolicy.ApplyDailyCap(capped, paid24h, cfg.DailyCap);
 
                 if(deferred.Length > 0)
+                {
                     deferNote = $"daily cap: {deferred.Length} payee(s) ({deferred.Sum(x => x.Amount)}) deferred — {paid24h} paid in the last 24 h, cap {cfg.DailyCap}";
+
+                    // ops:health on srv2 reads this: a log line alone would leave balances growing with nobody told
+                    await repo.RecordDeferralAsync(con, tx, poolId, deferred.Length, deferred.Sum(x => x.Amount));
+                }
 
                 if(pay.Length == 0)
                 {
                     await repo.UpdateRunStatsAsync(con, tx, poolId, paid24h, credited24h, wallet.Total);
                     return new PayoutGuardDecision.Skip(deferNote ?? "daily cap reached");
                 }
+
+                var (limited, waiting) = PayoutGuardPolicy.ApplyRunLimit(pay, cfg.MaxPayeesPerRun);
+                pay = limited;
+
+                if(waiting.Length > 0)
+                    runLimitNote = $"{waiting.Length} payee(s) wait for the next run (maxPayeesPerRun {cfg.MaxPayeesPerRun})";
 
                 var batch = pay.Sum(x => x.Amount);
                 var walletReason = PayoutGuardPolicy.WalletTripReasonOrNull(wallet, batch);
@@ -511,7 +539,10 @@ public class PayoutGuard : IPayoutGuard
                 Notify(poolId, tripReason);
 
             if(deferNote != null && ShouldLog($"{poolId}:defer"))
-                logger.Warn(() => $"[{poolId}] {deferNote}");
+                Warn(poolId, deferNote);
+
+            if(runLimitNote != null && ShouldLog($"{poolId}:runlimit"))
+                logger.Info(() => $"[{poolId}] {runLimitNote}");
 
             if(decision is PayoutGuardDecision.Run reserved)
             {

@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS payout_guard_state
     updated           TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc')
 );
 
+-- the last time the daily cap held payees back; ops:health treats a recent one as an incident (2026-11-06)
+ALTER TABLE payout_guard_state ADD COLUMN IF NOT EXISTS deferred_count INT NOT NULL DEFAULT 0;
+ALTER TABLE payout_guard_state ADD COLUMN IF NOT EXISTS deferred_amount decimal(28,12) NOT NULL DEFAULT 0;
+ALTER TABLE payout_guard_state ADD COLUMN IF NOT EXISTS deferred_at TIMESTAMP NULL;
+
 -- one row per payout attempt of a pool; written BEFORE the chain transaction
 CREATE TABLE IF NOT EXISTS payout_runs
 (

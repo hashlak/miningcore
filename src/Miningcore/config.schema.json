@@ -552,7 +552,15 @@
         "object",
         "null"
       ],
+      "additionalProperties": false,
       "properties": {
+        "maxPayeesPerRun": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
         "enabled": {
           "type": "boolean"
         },

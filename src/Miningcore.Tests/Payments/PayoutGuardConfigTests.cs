@@ -56,6 +56,30 @@ public class PayoutGuardConfigTests
         Assert.Equal(valid, result.IsValid);
     }
 
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData(500, true)]
+    [InlineData(0, false)]
+    [InlineData(-1, false)]
+    public void Run_Limit_Must_Be_Positive_When_Present(int? maxPayees, bool valid)
+    {
+        var cfg = new PayoutGuardConfig { PerPayoutCap = 5, DailyCap = 50, NominalBlockReward = 2, CreditMultiplier = 1.2m, MaxPayeesPerRun = maxPayees };
+
+        Assert.Equal(valid, new PayoutGuardConfigValidator().Validate(cfg).IsValid);
+    }
+
+    [Fact]
+    public void Schema_Knows_The_Run_Limit_And_Refuses_A_Mistyped_Key()
+    {
+        // a typo must stop the pool from starting: silently ignored, it would mean no limit at all
+        var root = Newtonsoft.Json.Linq.JObject.Parse(System.IO.File.ReadAllText(System.IO.Path.Combine(System.AppContext.BaseDirectory, "config.schema.json")));
+        var schema = Newtonsoft.Json.Schema.JSchema.Parse(root["definitions"]!["PayoutGuardConfig"]!.ToString());
+
+        Assert.True(Newtonsoft.Json.Schema.SchemaExtensions.IsValid(Newtonsoft.Json.Linq.JObject.Parse("{\"dailyCap\": 50000, \"maxPayeesPerRun\": 500}"), schema));
+        Assert.False(Newtonsoft.Json.Schema.SchemaExtensions.IsValid(Newtonsoft.Json.Linq.JObject.Parse("{\"maxPayeesPerRuns\": 500}"), schema));
+        Assert.False(Newtonsoft.Json.Schema.SchemaExtensions.IsValid(Newtonsoft.Json.Linq.JObject.Parse("{\"maxPayeesPerRun\": 0}"), schema));
+    }
+
     [Fact]
     public void Disabled_Block_Is_Not_Validated()
     {
