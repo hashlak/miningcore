@@ -912,7 +912,9 @@ public class Program : BackgroundService
 
         var cf = services.GetService<IConnectionFactory>();
 
-        if(await GetPostgresColumnType(cf, "payout_run_items", "sent_amount") == null)
+        // the newest column stands for the newest version of the script
+        if(await GetPostgresColumnType(cf, "payout_run_items", "sent_amount") == null ||
+           await GetPostgresColumnType(cf, "payout_guard_state", "deferred_at") == null)
             throw new PoolStartupException("Payout guard tables are missing or outdated: apply src/Miningcore/Persistence/Postgres/Scripts/payout_guard.sql (infra/host/payout-guard.sh install) before starting");
     }
 
