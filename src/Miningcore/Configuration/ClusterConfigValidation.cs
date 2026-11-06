@@ -217,6 +217,11 @@ public class PayoutGuardConfigValidator : AbstractValidator<PayoutGuardConfig>
                 .GreaterThanOrEqualTo(j => j.PerPayoutCap)
                 .WithMessage("Pool: paymentProcessing.guard.dailyCap must be >= perPayoutCap");
 
+            RuleFor(j => j.MaxPayeesPerRun)
+                .GreaterThan(0)
+                .When(j => j.MaxPayeesPerRun.HasValue)
+                .WithMessage("Pool: paymentProcessing.guard.maxPayeesPerRun must be > 0 when present");
+
             RuleFor(j => j.NominalBlockReward)
                 .GreaterThan(0)
                 .WithMessage("Pool: paymentProcessing.guard.nominalBlockReward must be > 0 (what one block credits to miners)");

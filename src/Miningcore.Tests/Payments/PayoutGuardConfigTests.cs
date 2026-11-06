@@ -56,6 +56,18 @@ public class PayoutGuardConfigTests
         Assert.Equal(valid, result.IsValid);
     }
 
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData(500, true)]
+    [InlineData(0, false)]
+    [InlineData(-1, false)]
+    public void Run_Limit_Must_Be_Positive_When_Present(int? maxPayees, bool valid)
+    {
+        var cfg = new PayoutGuardConfig { PerPayoutCap = 5, DailyCap = 50, NominalBlockReward = 2, CreditMultiplier = 1.2m, MaxPayeesPerRun = maxPayees };
+
+        Assert.Equal(valid, new PayoutGuardConfigValidator().Validate(cfg).IsValid);
+    }
+
     [Fact]
     public void Disabled_Block_Is_Not_Validated()
     {

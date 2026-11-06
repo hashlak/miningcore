@@ -1149,6 +1149,12 @@ public class PayoutGuardConfig
 
     /// <summary>Credits in 24 h above blocks × nominalBlockReward × this multiplier trip the breaker.</summary>
     public decimal CreditMultiplier { get; set; } = 1.2m;
+
+    /// <summary>
+    /// hashlak: most payees in one run, largest first; the rest wait for the next run (no limit when absent). Bitcoin-family
+    /// pools send one transaction per run, and a transaction over the size limit is refused and trips the breaker.
+    /// </summary>
+    public int? MaxPayeesPerRun { get; set; }
 }
 
 public partial class PoolPaymentProcessingConfig

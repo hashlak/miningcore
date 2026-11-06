@@ -67,6 +67,15 @@ public class PayoutGuardRepository : IPayoutGuardRepository
         return con.ExecuteAsync(query, new { poolId, reason }, tx);
     }
 
+    public Task RecordDeferralAsync(IDbConnection con, IDbTransaction tx, string poolId, int count, decimal amount)
+    {
+        const string query = @"UPDATE payout_guard_state
+            SET deferred_count = @count, deferred_amount = @amount, deferred_at = now() at time zone 'utc'
+            WHERE poolid = @poolId";
+
+        return con.ExecuteAsync(query, new { poolId, count, amount }, tx);
+    }
+
     public Task UpdateRunStatsAsync(IDbConnection con, IDbTransaction tx, string poolId, decimal paidToday, decimal expectedToday, decimal? walletBalance)
     {
         const string query = @"INSERT INTO payout_guard_state(poolid, day, paid_today, expected_today, wallet_balance, wallet_balance_at, updated)

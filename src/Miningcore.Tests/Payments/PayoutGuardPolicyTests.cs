@@ -23,6 +23,24 @@ public class PayoutGuardPolicyTests
     }
 
     [Fact]
+    public void RunLimit_Keeps_The_Largest_And_Leaves_The_Rest_Waiting()
+    {
+        var items = new[] { B("a", 5), B("b", 10), B("c", 2), B("d", 5) };
+
+        var (pay, waiting) = PayoutGuardPolicy.ApplyRunLimit(items, 2);
+        Assert.Equal(new[] { "b", "a" }, pay.Select(x => x.Address));          // equal amounts: by address, so it is stable
+        Assert.Equal(new[] { "d", "c" }, waiting.Select(x => x.Address));
+
+        (pay, waiting) = PayoutGuardPolicy.ApplyRunLimit(items, 4);            // exactly at the limit
+        Assert.Same(items, pay);
+        Assert.Empty(waiting);
+
+        (pay, waiting) = PayoutGuardPolicy.ApplyRunLimit(items, null);         // absent = no limit
+        Assert.Same(items, pay);
+        Assert.Empty(waiting);
+    }
+
+    [Fact]
     public void DailyCap_Pays_What_Fits_Largest_First_And_Defers_The_Rest()
     {
         var (pay, deferred) = PayoutGuardPolicy.ApplyDailyCap(new[] { B("a", 5), B("b", 10), B("c", 2) }, 90, 100);

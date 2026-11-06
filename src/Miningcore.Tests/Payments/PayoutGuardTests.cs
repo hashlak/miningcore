@@ -246,13 +246,42 @@ public class PayoutGuardTests
         Assert.Equal(10m, reserved.Context.Total);
         await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
         await repo.Received(1).UpdateRunStatsAsync(con, tx, "p", 100m, 0m, 1000m);
+        await repo.Received(1).RecordDeferralAsync(con, tx, "p", 2, 7m);       // a (5) and fee (2) are held back, and ops:health must hear of it
 
         repo.ClearReceivedCalls();
         repo.GetPaidLast24hAsync(con, tx, "p").Returns(Task.FromResult(100m));   // no room at all
         Assert.IsType<PayoutGuardDecision.Skip>(await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None));
         await repo.DidNotReceiveWithAnyArgs().InsertRunAsync(default, default, default, default);
         await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
+        await repo.Received(1).RecordDeferralAsync(con, tx, "p", 3, 17m);
         tx.Received().Commit();
+    }
+
+    [Fact]
+    public async Task Nothing_Held_Back_Records_No_Deferral()
+    {
+        repo.InsertRunAsync(con, tx, Arg.Any<PayoutRun>(), Arg.Any<PayoutRunItem[]>()).Returns(Task.CompletedTask);
+
+        Assert.IsType<PayoutGuardDecision.Run>(await guard.PrepareRunAsync(Pool(Config()), handler, candidates, CancellationToken.None));
+
+        await repo.DidNotReceiveWithAnyArgs().RecordDeferralAsync(default, default, default, default, default);
+    }
+
+    [Fact]
+    public async Task Run_Limit_Pays_The_Largest_And_Is_Not_A_Deferral()
+    {
+        PayoutRunItem[] items = null;
+        repo.InsertRunAsync(con, tx, Arg.Any<PayoutRun>(), Arg.Do<PayoutRunItem[]>(i => items = i)).Returns(Task.CompletedTask);
+        var config = Config();
+        config.MaxPayeesPerRun = 2;
+
+        var reserved = Assert.IsType<PayoutGuardDecision.Run>(await guard.PrepareRunAsync(Pool(config), handler, candidates, CancellationToken.None));
+
+        Assert.Equal(new[] { "b", "a" }, items.Select(x => x.Address));        // b capped at 10, then a (5); fee (2) waits
+        Assert.Equal(15m, reserved.Context.Total);
+        await repo.Received(1).UpdateRunStatsAsync(con, tx, "p", 15m, 0m, 1000m);
+        await repo.DidNotReceiveWithAnyArgs().RecordDeferralAsync(default, default, default, default, default);
+        await repo.DidNotReceiveWithAnyArgs().TripAsync(default, default, default, default);
     }
 
     [Fact]
